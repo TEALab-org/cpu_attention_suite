@@ -1,0 +1,9 @@
+clang++ \
+  -fopencilk \
+  -std=c++17 \
+  -g \
+  -Wall \
+  -Wno-deprecated-declarations \
+  -Ithird_party \
+  src/solver.cpp \
+  -o build/solver
