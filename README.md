@@ -22,7 +22,7 @@ CILK_NWORKERS=16 build/attention_solver fa2 data/problem_65536_64.npy -b 64 -w 1
 ```
 
 Algorithms: `reference`, `standard`, `streamed`, `fa2`, `recursive`, `summary` (alias `rec`;
-requires `-p` to be a power of 4, defaulting to `CILK_NWORKERS`), `query`.
+requires `-p` to be a power of 4, defaulting to `CILK_NWORKERS`), `query`, `hybrid` (any `p`).
 Run `build/attention_solver` with no arguments for the full option list.
 
 ## Testing

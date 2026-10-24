@@ -96,6 +96,10 @@ def solver_runs(workers: list[int]) -> list[SolverRun]:
             SolverRun("query", ("-b", str(b), "-g", str(g)), w)
             for b, g in itertools.product((16, 64), (16, 64, 256))
         ]
+        runs += [
+            SolverRun("hybrid", ("-b", str(b), "-g", str(g), "-p", str(p)), w)
+            for b, g, p in itertools.product((16, 64), (16, 64), (1, 3, 4, 12, 16, 48))
+        ]
     return runs
 
 

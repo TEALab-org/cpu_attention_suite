@@ -8,6 +8,7 @@
 #include "attention_utilities.hpp"
 #include "dense_attention.hpp"
 #include "flash_attention_2.hpp"
+#include "hybrid_attention.hpp"
 #include "parallel_summary.hpp"
 #include "query_parallel.hpp"
 #include "standard_attention_parallel.hpp"
@@ -77,6 +78,10 @@ const std::vector<SolverEntry>& solver_registry() {
          [](const AttentionProblem& P, const SolverConfig& c) {
              return query_parallel_attention(P.Q, P.K, P.V, c.block_size, c.grain);
          }},
+        {"hybrid", "Summary recursion while p splits 4 ways, then query-parallel (uses -b, -g, -p)",
+         [](const AttentionProblem& P, const SolverConfig& c) {
+             return hybrid_attention(P.Q, P.K, P.V, c.p, c.block_size, c.grain);
+         }},
     };
     return registry;
 }
@@ -104,7 +109,7 @@ void print_usage(const char* argv0) {
         << "\nOptions:\n"
         << "  -b, --block-size B  Tile / base case size (default 64)\n"
         << "  -g, --grain G       Query-parallel serial cutoff on |I| (default 256)\n"
-        << "  -p, --p P           Summary processor budget, must be a power of 4 (default: nworkers)\n"
+        << "  -p, --p P           Processor budget for summary (power of 4) and hybrid (default: nworkers)\n"
         << "  -r, --reps R        Timed repetitions (default 1)\n"
         << "  -w, --warmup W      Untimed warmup runs (default 0)\n"
         << "  -o, --output PATH   Write the output matrix O of the last run to PATH (.npy)\n"
