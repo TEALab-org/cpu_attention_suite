@@ -12,8 +12,13 @@ namespace detail {
 /**
  * ParallelForwardMerge(I, J, \Sigma, \Sigma_{11}, \Sigma_{12}, \Sigma_{21}, \Sigma_{22})
  * Merges four quadrant child summaries into the parent summary \Sigma.
+ *
+ * noinline works around an OpenCilk 3.0 compiler crash: with -DNDEBUG and AVX-512 targets
+ * (skylake-avx512, icelake-server, sapphirerapids), inlining this cilk_for into the spawning
+ * parallel_forward_summary crashes the jump-threading pass ("Reattach predecessor found with
+ * no corresponding Detach predecessor"). The call costs nothing next to the O(|I| d) merge.
  */
-inline void parallel_forward_merge(
+__attribute__((noinline)) inline void parallel_forward_merge(
     IndexRange I,
     IndexRange /*J*/,
     AttentionSummary& sigma,
