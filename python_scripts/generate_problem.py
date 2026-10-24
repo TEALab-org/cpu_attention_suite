@@ -2,6 +2,8 @@
 """Generate synthetic stacked (3, N, d) attention inputs [Q, K, V] in .npy format."""
 # Writen by Gemini (Oct 6 2026)
 
+from __future__ import annotations
+
 import argparse
 from pathlib import Path
 import numpy as np

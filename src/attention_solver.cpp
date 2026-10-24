@@ -1,27 +1,36 @@
 // Unified forward-pass driver: dispatches to every dense attention solver.
 //
-//   attention_solver <algorithm> <problem.npy> [options]
+//   attention_solver <algorithm> (<problem.npy> | --random N) [options]
 //
-// Timings go to stdout (one "<t> ms" line per repetition, or a single JSON
-// object with --json); diagnostics go to stderr.
+// Timings go to stdout: one "<t> ms" line per repetition (flushed as each finishes),
+// one JSON object per repetition with --jsonl, or a single JSON summary with --json.
+// Diagnostics go to stderr. Building with -DATTENTION_USE_PAPI adds per-repetition
+// hardware counter totals (summed over all worker threads) to the JSON outputs.
 
 #include "attention_utilities.hpp"
 #include "dense_attention.hpp"
 #include "flash_attention_2.hpp"
 #include "hybrid_attention.hpp"
 #include "parallel_summary.hpp"
+#include "problem_generator.hpp"
 #include "query_parallel.hpp"
 #include "standard_attention_parallel.hpp"
 #include "standard_attention_reference.hpp"
 #include "standard_attention_streamed.hpp"
 
 #include <cilk/cilk_api.h>
+#ifdef ATTENTION_USE_PAPI
+#include "papi_counters.hpp"
+#endif
 #include <charconv>
 #include <chrono>
+#include <cstdint>
 #include <cstdlib>
 #include <functional>
 #include <iomanip>
 #include <iostream>
+#include <memory>
+#include <sstream>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -34,8 +43,13 @@ struct SolverConfig {
     int p = 0;                    // Parallel summary processor budget (0 = nworkers)
     int reps = 1;
     int warmup = 0;
+    std::string problem_path;
+    Eigen::Index random_n = 0;    // > 0: generate a random problem instead of loading one
+    uint64_t seed = 0;
     std::string output_path;
     bool json = false;
+    bool jsonl = false;
+    std::string papi_events = "PAPI_L1_DCM,PAPI_L2_DCM,PAPI_L3_TCM";
 };
 
 using SolverFn = std::function<AttentionMatrixf(const AttentionProblem&, const SolverConfig&)>;
@@ -100,20 +114,26 @@ const SolverEntry* find_solver(std::string_view name) {
 
 void print_usage(const char* argv0) {
     std::cerr
-        << "Usage: " << argv0 << " <algorithm> <problem.npy> [options]\n\n"
+        << "Usage: " << argv0 << " <algorithm> (<problem.npy> | --random N) [options]\n\n"
         << "Algorithms:\n";
     for (const auto& entry : solver_registry()) {
         std::cerr << "  " << std::left << std::setw(11) << entry.name << entry.description << "\n";
     }
     std::cerr
         << "\nOptions:\n"
+        << "      --random N      Generate a uniform [-1, 1) problem of length N instead of loading one\n"
+        << "      --seed S        Seed for --random (default 0)\n"
         << "  -b, --block-size B  Tile / base case size (default 64)\n"
         << "  -g, --grain G       Query-parallel serial cutoff on |I| (default 256)\n"
         << "  -p, --p P           Processor budget for summary (power of 4) and hybrid (default: nworkers)\n"
         << "  -r, --reps R        Timed repetitions (default 1)\n"
         << "  -w, --warmup W      Untimed warmup runs (default 0)\n"
         << "  -o, --output PATH   Write the output matrix O of the last run to PATH (.npy)\n"
-        << "      --json          Print a single JSON result object instead of per-rep times\n"
+        << "      --json          Print a single JSON summary object after all repetitions\n"
+        << "      --jsonl         Print one JSON object per repetition as it finishes\n"
+#ifdef ATTENTION_USE_PAPI
+        << "      --papi-events E Comma-separated PAPI events (default PAPI_L1_DCM,PAPI_L2_DCM,PAPI_L3_TCM)\n"
+#endif
         << "\nWorker count is controlled by the CILK_NWORKERS environment variable.\n";
 }
 
@@ -125,6 +145,31 @@ bool parse_int(std::string_view str, Int& out) {
 
 bool is_power_of_4(int p) {
     return p >= 1 && (p & (p - 1)) == 0 && (p & 0x55555555) != 0;
+}
+
+[[maybe_unused]] std::vector<std::string> split_csv(const std::string& csv) {
+    std::vector<std::string> items;
+    std::stringstream ss(csv);
+    std::string item;
+    while (std::getline(ss, item, ',')) {
+        if (!item.empty()) {
+            items.push_back(item);
+        }
+    }
+    return items;
+}
+
+struct RepResult {
+    double time_ms = 0.0;
+    std::vector<long long> counters; // Empty unless built with PAPI
+};
+
+void print_counters_json(std::ostream& out, const std::vector<std::string>& events, const RepResult& rep) {
+    out << "{";
+    for (size_t e = 0; e < events.size(); ++e) {
+        out << (e ? ", " : "") << "\"" << events[e] << "\": " << rep.counters[e];
+    }
+    out << "}";
 }
 
 } // namespace
@@ -141,10 +186,15 @@ int main(int argc, char** argv) {
         print_usage(argv[0]);
         return 2;
     }
-    const std::string problem_path = argv[2];
 
     SolverConfig config;
-    for (int i = 3; i < argc; ++i) {
+    int first_option = 2;
+    if (argv[2][0] != '-') {
+        config.problem_path = argv[2];
+        first_option = 3;
+    }
+
+    for (int i = first_option; i < argc; ++i) {
         const std::string_view arg(argv[i]);
         const bool has_value = (i + 1 < argc);
         bool ok = true;
@@ -159,10 +209,21 @@ int main(int argc, char** argv) {
             ok = parse_int(argv[++i], config.reps) && config.reps > 0;
         } else if ((arg == "-w" || arg == "--warmup") && has_value) {
             ok = parse_int(argv[++i], config.warmup) && config.warmup >= 0;
+        } else if (arg == "--random" && has_value) {
+            ok = parse_int(argv[++i], config.random_n) && config.random_n > 0;
+        } else if (arg == "--seed" && has_value) {
+            ok = parse_int(argv[++i], config.seed);
         } else if ((arg == "-o" || arg == "--output") && has_value) {
             config.output_path = argv[++i];
         } else if (arg == "--json") {
             config.json = true;
+        } else if (arg == "--jsonl") {
+            config.jsonl = true;
+#ifdef ATTENTION_USE_PAPI
+        } else if (arg == "--papi-events" && has_value) {
+            config.papi_events = argv[++i];
+            ok = !split_csv(config.papi_events).empty();
+#endif
         } else {
             std::cerr << "Error: unrecognized or incomplete option '" << arg << "'\n\n";
             print_usage(argv[0]);
@@ -173,6 +234,15 @@ int main(int argc, char** argv) {
             std::cerr << "Error: invalid value for " << arg << ": '" << argv[i] << "'\n";
             return 2;
         }
+    }
+
+    if (config.problem_path.empty() == (config.random_n == 0)) {
+        std::cerr << "Error: give exactly one of a problem file or --random N\n";
+        return 2;
+    }
+    if (config.json && config.jsonl) {
+        std::cerr << "Error: --json and --jsonl are mutually exclusive\n";
+        return 2;
     }
 
     // Eigen lazily initializes a static cache-size table on first GEMM; touch it serially
@@ -191,12 +261,25 @@ int main(int argc, char** argv) {
 
     AttentionProblem problem;
     try {
-        problem = AttentionProblem(problem_path);
+        problem = config.random_n > 0 ? generate_random_problem(config.random_n, config.seed)
+                                      : AttentionProblem(config.problem_path);
     } catch (const std::exception& e) {
         std::cerr << "Error: " << e.what() << "\n";
         return 1;
     }
     const Eigen::Index N = problem.seq_len();
+
+    std::vector<std::string> events;
+#ifdef ATTENTION_USE_PAPI
+    std::unique_ptr<ThreadCounters> counters;
+    try {
+        counters = std::make_unique<ThreadCounters>(split_csv(config.papi_events));
+        events = counters->events();
+    } catch (const std::exception& e) {
+        std::cerr << "Error: " << e.what() << "\n";
+        return 1;
+    }
+#endif
 
     std::cerr << "Running " << solver->name << " for N = " << N << " (d = 64), workers = " << nworkers
               << ", block size = " << config.block_size << ", grain = " << config.grain
@@ -207,13 +290,34 @@ int main(int argc, char** argv) {
         O = solver->run(problem, config);
     }
 
-    std::vector<double> times;
-    times.reserve(config.reps);
+    std::cout << std::setprecision(10);
+    std::vector<RepResult> reps;
+    reps.reserve(config.reps);
     for (int r = 0; r < config.reps; ++r) {
+        RepResult rep;
+#ifdef ATTENTION_USE_PAPI
+        counters->start();
+#endif
         const auto t0 = std::chrono::steady_clock::now();
         O = solver->run(problem, config);
         const auto t1 = std::chrono::steady_clock::now();
-        times.push_back(std::chrono::duration<double, std::milli>(t1 - t0).count());
+#ifdef ATTENTION_USE_PAPI
+        rep.counters = counters->stop();
+#endif
+        rep.time_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+
+        // Stream each repetition so a killed run keeps the repetitions it finished
+        if (config.jsonl) {
+            std::cout << "{\"rep\": " << r << ", \"time_ms\": " << rep.time_ms;
+            if (!events.empty()) {
+                std::cout << ", \"counters\": ";
+                print_counters_json(std::cout, events, rep);
+            }
+            std::cout << "}" << std::endl;
+        } else if (!config.json) {
+            std::cout << rep.time_ms << " ms" << std::endl;
+        }
+        reps.push_back(std::move(rep));
     }
 
     if (!config.output_path.empty()) {
@@ -225,21 +329,25 @@ int main(int argc, char** argv) {
         }
     }
 
-    std::cout << std::setprecision(10);
     if (config.json) {
         std::cout << "{\"name\": \"" << solver->name << "\", \"N\": " << N << ", \"d\": 64"
                   << ", \"threads\": " << nworkers << ", \"block_size\": " << config.block_size
                   << ", \"base_size\": " << config.block_size << ", \"grain\": " << config.grain
                   << ", \"p\": " << config.p
                   << ", \"times\": [";
-        for (size_t i = 0; i < times.size(); ++i) {
-            std::cout << (i ? ", " : "") << times[i];
+        for (size_t i = 0; i < reps.size(); ++i) {
+            std::cout << (i ? ", " : "") << reps[i].time_ms;
         }
-        std::cout << "]}\n";
-    } else {
-        for (double t : times) {
-            std::cout << t << " ms\n";
+        std::cout << "]";
+        if (!events.empty()) {
+            std::cout << ", \"counters\": [";
+            for (size_t i = 0; i < reps.size(); ++i) {
+                std::cout << (i ? ", " : "");
+                print_counters_json(std::cout, events, reps[i]);
+            }
+            std::cout << "]";
         }
+        std::cout << "}\n";
     }
     return 0;
 }

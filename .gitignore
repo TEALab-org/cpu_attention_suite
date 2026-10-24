@@ -4,3 +4,5 @@ data
 .DS_Store
 results
 plots
+attn_*.out
+__pycache__
