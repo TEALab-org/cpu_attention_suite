@@ -14,8 +14,8 @@
  *    and thread synchronization on the output matrix O.
  * 2. Unnormalized accumulator O_acc: defers division by the row sum l_i
  *    until the full sequence of K, V blocks has been processed.
- * 3. Tiled L1/L2 memory footprint: working buffers S and P are small
- *    (Br x Bc) blocks that stay in CPU cache lines.
+ * 3. Tiled L1/L2 memory footprint: the working buffer S (reused in place as P) is a small
+ *    (Br x Bc) block that stays in CPU cache.
  */
 inline AttentionMatrixf flash_attention_2(
     const AttentionMatrixf& Q,
@@ -47,13 +47,14 @@ inline AttentionMatrixf flash_attention_2(
         Eigen::VectorXf m = Eigen::VectorXf::Constant(br, -std::numeric_limits<float>::infinity());
         Eigen::VectorXf l = Eigen::VectorXf::Zero(br);
 
-        // FlashAttention-2 unnormalized output accumulator: \tilde{O}_i = P_i * V
-        Eigen::Matrix<float, Eigen::Dynamic, 64, Eigen::RowMajor> O_acc = 
-            Eigen::Matrix<float, Eigen::Dynamic, 64, Eigen::RowMajor>::Zero(br, 64);
+        // FlashAttention-2 unnormalized output accumulator \tilde{O}_i, accumulated directly
+        // in this task's (disjoint) slice of O
+        auto O_acc = O.middleRows(r_start, br);
+        O_acc.setZero();
 
-        // Preallocated thread-local tile buffers
+        // Thread-local tile buffer, allocated once per query block. S is exponentiated
+        // in place into P = exp(S - m_new), so no separate P buffer is needed.
         Eigen::Matrix<float, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor> S(br, Bc);
-        Eigen::Matrix<float, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor> P(br, Bc);
 
         // Inner loop over Key and Value blocks
         for (Eigen::Index bj = 0; bj < num_kv_blocks; ++bj) {
@@ -70,10 +71,11 @@ inline AttentionMatrixf flash_attention_2(
 
             auto K_block = K.middleRows(c_start, bc);
             auto V_block = V.middleRows(c_start, bc);
+            auto S_tile = S.leftCols(bc);
 
             // 1. Tiled affinity GEMM: S_ij = (Q_i * K_j^T) * scale
             // Result size: (br, bc)
-            S.leftCols(bc).noalias() = (Q_block * K_block.transpose()) * scale;
+            S_tile.noalias() = (Q_block * K_block.transpose()) * scale;
 
             // 2. Intra-block causal diagonal masking
             if (causal && c_end > r_start) {
@@ -82,53 +84,46 @@ inline AttentionMatrixf flash_attention_2(
                     for (Eigen::Index c = 0; c < bc; ++c) {
                         const Eigen::Index gc = c_start + c;
                         if (gc > gr) {
-                            S(r, c) = -std::numeric_limits<float>::infinity();
+                            S_tile(r, c) = -std::numeric_limits<float>::infinity();
                         }
                     }
                 }
             }
 
-            // 3. Online Softmax update
-            // Row-wise block maximum \tilde{m}_{ij}
-            Eigen::VectorXf m_tilde = S.leftCols(bc).rowwise().maxCoeff();
-            Eigen::VectorXf m_new = m.cwiseMax(m_tilde);
-
-            // Rescaling factor \alpha = exp(m - m_new)
-            Eigen::VectorXf alpha(br);
+            // 3. Online softmax update, one row at a time:
+            //   m_new = max(m, rowmax(S)),  \alpha = exp(m - m_new),  P = exp(S - m_new)
+            //   l = \alpha * l + rowsum(P),  O_acc = diag(\alpha) * O_acc
             for (Eigen::Index r = 0; r < br; ++r) {
-                alpha(r) = (m(r) == -std::numeric_limits<float>::infinity())
+                auto s_row = S_tile.row(r);
+                const float m_new = std::max(m(r), s_row.maxCoeff());
+
+                if (m_new == -std::numeric_limits<float>::infinity()) {
+                    // Row fully masked so far: contributes nothing (avoids exp(-inf - -inf) = NaN)
+                    s_row.setZero();
+                    continue;
+                }
+
+                const float alpha = (m(r) == -std::numeric_limits<float>::infinity())
                     ? 0.0f
-                    : std::exp(m(r) - m_new(r));
+                    : std::exp(m(r) - m_new);
+
+                s_row = (s_row.array() - m_new).exp();
+                l(r) = alpha * l(r) + s_row.sum();
+                O_acc.row(r) *= alpha;
+                m(r) = m_new;
             }
 
-            // Unnormalized exponentiated probabilities: P = exp(S - m_new)
-            for (Eigen::Index r = 0; r < br; ++r) {
-                P.row(r).head(bc) = (S.row(r).head(bc).array() - m_new(r)).exp();
-            }
-
-            // Row-wise sum of current block exponentials
-            Eigen::VectorXf p_sum = P.leftCols(bc).rowwise().sum();
-
-            // Running sum update: l_new = alpha * l + rowsum(P)
-            l = alpha.cwiseProduct(l) + p_sum;
-
-            // 4. Update unnormalized output accumulator:
-            // O_acc = diag(alpha) * O_acc + P * V_block
-            for (Eigen::Index r = 0; r < br; ++r) {
-                O_acc.row(r) *= alpha(r);
-            }
-            O_acc.noalias() += P.leftCols(bc) * V_block;
-
-            m = m_new;
+            // 4. Update unnormalized output accumulator: O_acc += P * V_block
+            O_acc.noalias() += S_tile * V_block;
         }
 
         // 5. Final FlashAttention-2 normalization:
         // O_i = diag(1 / l_i) * O_acc
         for (Eigen::Index r = 0; r < br; ++r) {
             if (l(r) > 0.0f) {
-                O.row(r_start + r).noalias() = O_acc.row(r) / l(r);
+                O_acc.row(r) /= l(r);
             } else {
-                O.row(r_start + r).setZero();
+                O_acc.row(r).setZero();
             }
         }
     }
