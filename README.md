@@ -21,7 +21,8 @@ python python_scripts/generate_problem.py -N 65536 -d 64 -o data/problem_65536_6
 CILK_NWORKERS=16 build/attention_solver fa2 data/problem_65536_64.npy -b 64 -w 1 -r 5 --json
 ```
 
-Algorithms: `reference`, `standard`, `streamed`, `fa2`, `recursive`, `summary` (alias `rec`).
+Algorithms: `reference`, `standard`, `streamed`, `fa2`, `recursive`, `summary` (alias `rec`;
+requires `-p` to be a power of 4, defaulting to `CILK_NWORKERS`), `query`.
 Run `build/attention_solver` with no arguments for the full option list.
 
 ## Testing

@@ -9,6 +9,7 @@
 #include "dense_attention.hpp"
 #include "flash_attention_2.hpp"
 #include "parallel_summary.hpp"
+#include "query_parallel.hpp"
 #include "standard_attention_parallel.hpp"
 #include "standard_attention_reference.hpp"
 #include "standard_attention_streamed.hpp"
@@ -28,7 +29,8 @@ namespace {
 
 struct SolverConfig {
     Eigen::Index block_size = 64; // FA2 tile size (Br = Bc) / recursive base case size
-    int p = 0;                    // Parallel summary processor budget (0 = derive from nworkers)
+    Eigen::Index grain = 256;     // QueryParallel serial cutoff on |I|
+    int p = 0;                    // Parallel summary processor budget (0 = nworkers)
     int reps = 1;
     int warmup = 0;
     std::string output_path;
@@ -41,6 +43,7 @@ struct SolverEntry {
     const char* name;
     const char* description;
     SolverFn run;
+    bool needs_power_of_4_p = false;
 };
 
 const std::vector<SolverEntry>& solver_registry() {
@@ -68,6 +71,11 @@ const std::vector<SolverEntry>& solver_registry() {
         {"summary", "Parallel summary cache-oblivious attention (uses -b, -p)",
          [](const AttentionProblem& P, const SolverConfig& c) {
              return cache_oblivious_attention_opencilk(P.Q, P.K, P.V, c.p, c.block_size);
+         },
+         /*needs_power_of_4_p=*/true},
+        {"query", "Query-parallel cache-oblivious attention (uses -b, -g)",
+         [](const AttentionProblem& P, const SolverConfig& c) {
+             return query_parallel_attention(P.Q, P.K, P.V, c.block_size, c.grain);
          }},
     };
     return registry;
@@ -95,7 +103,8 @@ void print_usage(const char* argv0) {
     std::cerr
         << "\nOptions:\n"
         << "  -b, --block-size B  Tile / base case size (default 64)\n"
-        << "  -p, --p P           Summary processor budget, power of 4 (default: nworkers rounded up)\n"
+        << "  -g, --grain G       Query-parallel serial cutoff on |I| (default 256)\n"
+        << "  -p, --p P           Summary processor budget, must be a power of 4 (default: nworkers)\n"
         << "  -r, --reps R        Timed repetitions (default 1)\n"
         << "  -w, --warmup W      Untimed warmup runs (default 0)\n"
         << "  -o, --output PATH   Write the output matrix O of the last run to PATH (.npy)\n"
@@ -107,14 +116,6 @@ template <typename Int>
 bool parse_int(std::string_view str, Int& out) {
     auto [ptr, ec] = std::from_chars(str.data(), str.data() + str.size(), out);
     return ec == std::errc() && ptr == str.data() + str.size();
-}
-
-int next_power_of_4(int n) {
-    int p = 1;
-    while (p < n) {
-        p *= 4;
-    }
-    return p;
 }
 
 bool is_power_of_4(int p) {
@@ -146,7 +147,9 @@ int main(int argc, char** argv) {
         if ((arg == "-b" || arg == "--block-size") && has_value) {
             ok = parse_int(argv[++i], config.block_size) && config.block_size > 0;
         } else if ((arg == "-p" || arg == "--p") && has_value) {
-            ok = parse_int(argv[++i], config.p) && is_power_of_4(config.p);
+            ok = parse_int(argv[++i], config.p) && config.p > 0;
+        } else if ((arg == "-g" || arg == "--grain") && has_value) {
+            ok = parse_int(argv[++i], config.grain) && config.grain > 0;
         } else if ((arg == "-r" || arg == "--reps") && has_value) {
             ok = parse_int(argv[++i], config.reps) && config.reps > 0;
         } else if ((arg == "-w" || arg == "--warmup") && has_value) {
@@ -173,7 +176,12 @@ int main(int argc, char** argv) {
 
     const int nworkers = __cilkrts_get_nworkers();
     if (config.p == 0) {
-        config.p = next_power_of_4(nworkers);
+        config.p = nworkers;
+    }
+    if (solver->needs_power_of_4_p && !is_power_of_4(config.p)) {
+        std::cerr << "Error: " << solver->name << " requires p to be a power of 4, got p = " << config.p
+                  << (config.p == nworkers ? " (from nworkers; pass -p or set CILK_NWORKERS)" : "") << "\n";
+        return 2;
     }
 
     AttentionProblem problem;
@@ -186,7 +194,8 @@ int main(int argc, char** argv) {
     const Eigen::Index N = problem.seq_len();
 
     std::cerr << "Running " << solver->name << " for N = " << N << " (d = 64), workers = " << nworkers
-              << ", block size = " << config.block_size << ", p = " << config.p << "\n";
+              << ", block size = " << config.block_size << ", grain = " << config.grain
+              << ", p = " << config.p << "\n";
 
     AttentionMatrixf O;
     for (int w = 0; w < config.warmup; ++w) {
@@ -215,7 +224,8 @@ int main(int argc, char** argv) {
     if (config.json) {
         std::cout << "{\"name\": \"" << solver->name << "\", \"N\": " << N << ", \"d\": 64"
                   << ", \"threads\": " << nworkers << ", \"block_size\": " << config.block_size
-                  << ", \"base_size\": " << config.block_size << ", \"p\": " << config.p
+                  << ", \"base_size\": " << config.block_size << ", \"grain\": " << config.grain
+                  << ", \"p\": " << config.p
                   << ", \"times\": [";
         for (size_t i = 0; i < times.size(); ++i) {
             std::cout << (i ? ", " : "") << times[i];

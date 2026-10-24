@@ -92,6 +92,10 @@ def solver_runs(workers: list[int]) -> list[SolverRun]:
             SolverRun("summary", ("-b", str(b), "-p", str(p)), w)
             for b, p in itertools.product((16, 64), (1, 4, 16))
         ]
+        runs += [
+            SolverRun("query", ("-b", str(b), "-g", str(g)), w)
+            for b, g in itertools.product((16, 64), (16, 64, 256))
+        ]
     return runs
 
 
@@ -188,6 +192,17 @@ def run_problem(runner: SolverRunner, problem: Problem, runs: list[SolverRun], d
             print(f"  FAIL  {msg}")
             return None
         return np.load(out_path)
+
+    bad_p = SolverRun("summary", ("-p", "8"))
+    if "summary" in {r.algorithm for r in runs}:
+        proc = runner.run(bad_p, problem_path, out_path)
+        if proc.returncode == 0:
+            results.failures.append(f"expected non-zero exit  {bad_p.label}")
+            print(f"  FAIL  expected non-zero exit  {bad_p.label}")
+        else:
+            results.passed += 1
+            if verbose:
+                print(f"  ok    rejected as expected  {bad_p.label}")
 
     ref_run = SolverRun("reference")
     o_ref = execute(ref_run)
