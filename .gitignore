@@ -2,3 +2,5 @@ build
 data
 .venv
 .DS_Store
+results
+plots

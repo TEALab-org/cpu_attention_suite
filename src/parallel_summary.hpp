@@ -1,6 +1,6 @@
 #pragma once
 
-#include "attention_utilities.hpp" // Provides AttentionMatrixf and AttentionProblem
+#include "attention_utilities.hpp"
 #include <cilk/cilk.h>
 #include <algorithm>
 #include <cassert>
