@@ -19,7 +19,7 @@ set -uo pipefail
 label="$1"
 REPO="${REPO:-${SLURM_SUBMIT_DIR:-$(cd "$(dirname "$0")/.." && pwd)}}"
 RESULTS_DIR="${RESULTS_DIR:-${SCRATCH:-$HOME}/cpu_attention_results}"
-MODULES="${MODULES:-opencilk papi}"
+MODULES="${MODULES:-opencilk/3.0.0 papi/7.1.0}"
 
 if command -v module >/dev/null 2>&1 && [[ -n "$MODULES" ]]; then
   # shellcheck disable=SC2086
