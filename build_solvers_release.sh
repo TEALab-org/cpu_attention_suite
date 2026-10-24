@@ -1,30 +1,16 @@
-clang++ \
-  -fopencilk \
-  -std=c++17 \
-  -march=native \
-  -O3 \
-  -Wall \
-  -Ithird_party \
-  src/fa2_solver.cpp \
-  -o build/fa2_solver
+#!/usr/bin/env bash
+# Release build of the unified forward-pass solver. Override MARCH for cross/emulated builds,
+# e.g. MARCH=x86-64-v3 ./build_solvers_release.sh
+set -euo pipefail
+mkdir -p build
 
 clang++ \
   -fopencilk \
   -std=c++17 \
-  -march=native \
+  -march="${MARCH:-native}" \
   -O3 \
+  -DNDEBUG \
   -Wall \
   -Ithird_party \
-  src/standard_solver.cpp \
-  -o build/standard_solver
-
-clang++ \
-  -fopencilk \
-  -std=c++17 \
-  -march=native \
-  -O3 \
-  -Wall \
-  -Ithird_party \
-  src/rec_solver.cpp \
-  -o build/rec_solver
-
+  src/attention_solver.cpp \
+  -o build/attention_solver

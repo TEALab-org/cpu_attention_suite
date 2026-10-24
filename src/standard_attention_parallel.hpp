@@ -1,3 +1,10 @@
+#pragma once
+
+#include "attention_utilities.hpp"
+#include <cmath>
+#include <limits>
+#include <cilk/cilk.h>
+
 /**
  * OpenCilk-Parallelized Standard Attention Reference:
  *   S = (Q * K^T) / sqrt(d)

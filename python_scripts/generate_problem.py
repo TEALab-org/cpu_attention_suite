@@ -7,6 +7,15 @@ from pathlib import Path
 import numpy as np
 
 
+def generate_problem(n: int, d: int, seed: int | None = None) -> np.ndarray:
+    """Return a (3, n, d) float32 tensor [Q, K, V] uniformly distributed in [-1.0, 1.0)."""
+    if n <= 0 or d <= 0:
+        raise ValueError("Sequence length N and head dimension d must be positive integers.")
+    rng = np.random.default_rng(seed)
+    # Axis 0 contains [Q, K, V] sequentially
+    return rng.uniform(-1.0, 1.0, size=(3, n, d)).astype(np.float32)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Generate a synthetic QKV attention problem saved as a (3, N, d) float32 .npy file."
@@ -44,14 +53,7 @@ def main() -> None:
 
     args = parser.parse_args()
 
-    if args.n <= 0 or args.d <= 0:
-        raise ValueError("Sequence length N and head dimension d must be positive integers.")
-
-    rng = np.random.default_rng(args.seed)
-
-    # Generate contiguous float32 values uniformly distributed in [-1.0, 1.0)
-    # Axis 0 contains [Q, K, V] sequentially
-    tensor_qkv = rng.uniform(-1.0, 1.0, size=(3, args.n, args.d)).astype(np.float32)
+    tensor_qkv = generate_problem(args.n, args.d, args.seed)
 
     output_path = Path(args.output)
     output_path.parent.mkdir(parents=True, exist_ok=True)

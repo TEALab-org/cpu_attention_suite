@@ -1,3 +1,9 @@
+#pragma once
+
+#include "attention_utilities.hpp"
+#include <cmath>
+#include <limits>
+
 /**
  * Standard Scaled Dot-Product Attention Reference:
  *   S = (Q * K^T) / sqrt(d)

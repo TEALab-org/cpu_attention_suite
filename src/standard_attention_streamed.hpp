@@ -1,3 +1,10 @@
+#pragma once
+
+#include "attention_utilities.hpp"
+#include <cmath>
+#include <limits>
+#include <cilk/cilk.h>
+
 /**
  * Fused Row-Streamed Attention:
  * Computes exact standard attention without materializing S in global DRAM.
