@@ -22,10 +22,11 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from results_io import ALGORITHMS, ARCHITECTURES, PAPI_EVENTS, load_records, machine_threads  # noqa: E402
+from results_io import (  # noqa: E402
+    ARCHITECTURES, PAPI_EVENTS, PASSES, display_name, load_records, machine_threads, result_kind,
+)
 
-DISPLAY = dict(ALGORITHMS)
-DEFAULT_ALGORITHMS = "fa2,summary,query,hybrid"
+DEFAULT_ALGORITHMS = {"forward": "fa2,summary,query,hybrid", "backward": "fa2_bwd,standard_bwd"}
 
 # (key, short header); "time" comes from the timing sweep, the rest from the PAPI sweep
 COLUMNS = [("time", "Runtime")] + [(event, level) for event, level in PAPI_EVENTS]
@@ -61,11 +62,13 @@ def format_number(value: float, sig: int = 3) -> str:
 
 
 def build_table(results_dir: Path, labels: List[str], algorithms: List[str], n: int, include_partial: bool,
-                bold_best: bool, caption: Optional[str], label: str, wide: bool) -> Tuple[str, List[str]]:
+                bold_best: bool, caption: Optional[str], label: str, wide: bool,
+                pass_name: str) -> Tuple[str, List[str]]:
     warnings = []
     values: Dict[Tuple[str, str, str], Tuple[float, bool]] = {}
     for arch in labels:
-        records = {kind: load_records(results_dir / arch / kind, include_partial) for kind in ("sweep", "papi")}
+        records = {kind: load_records(results_dir / arch / result_kind(kind, pass_name), include_partial)
+                   for kind in ("sweep", "papi")}
         missing = {"timing": [], "PAPI": []}
         for algorithm in algorithms:
             for key, _ in COLUMNS:
@@ -92,7 +95,7 @@ def build_table(results_dir: Path, labels: List[str], algorithms: List[str], n: 
     lines = [
         rf"\begin{{{env}}}[t]",
         r"  \centering",
-        rf"  \caption{{{caption or default_caption(n, bold_best, any_partial)}}}",
+        rf"  \caption{{{caption or default_caption(n, bold_best, any_partial, pass_name)}}}",
         rf"  \label{{{label}}}",
         r"  \small",
         r"  \begin{tabular}{ll" + "r" * len(COLUMNS) + "}",
@@ -114,7 +117,7 @@ def build_table(results_dir: Path, labels: List[str], algorithms: List[str], n: 
         arch_cell = (rf"\multirow{{{len(algorithms)}}}{{*}}{{\begin{{tabular}}[c]{{@{{}}l@{{}}}}{name}\\"
                      rf"{threads} cores\end{{tabular}}}}" if threads else rf"\multirow{{{len(algorithms)}}}{{*}}{{{name}}}")
         for i, algorithm in enumerate(algorithms):
-            cells = [arch_cell if i == 0 else "", DISPLAY.get(algorithm, algorithm)]
+            cells = [arch_cell if i == 0 else "", display_name(algorithm)]
             for key, _ in COLUMNS:
                 if (arch, algorithm, key) not in values:
                     cells.append("--")
@@ -133,10 +136,10 @@ def build_table(results_dir: Path, labels: List[str], algorithms: List[str], n: 
     return "\n".join(lines), warnings
 
 
-def default_caption(n: int, bold_best: bool, any_partial: bool) -> str:
+def default_caption(n: int, bold_best: bool, any_partial: bool, pass_name: str) -> str:
     exp = n.bit_length() - 1
     size = rf"$N = 2^{{{exp}}}$" if 2**exp == n else rf"$N = {n}$"
-    text = (rf"Dense forward pass at {size}, $d = 64$, using all cores of each node. Runtime is the median "
+    text = (rf"Dense {pass_name} pass at {size}, $d = 64$, using all cores of each node. Runtime is the median "
             r"over repetitions of the timing sweep; cache misses are medians from the PAPI sweep, "
             r"summed over all worker threads.")
     if bold_best:
@@ -154,11 +157,14 @@ def main() -> int:
     parser.add_argument("--n", type=int, default=2**20, help="Sequence length to tabulate (default: %(default)s)")
     parser.add_argument("--labels", default="skx,icx,spr",
                         help="Comma-separated machine labels, one row group each (default: %(default)s)")
-    parser.add_argument("--algorithms", default=DEFAULT_ALGORITHMS,
-                        help="Comma-separated algorithms, in row order (default: %(default)s)")
-    parser.add_argument("--name", default=None, help="Output file stem (default: dense_forward_table_N<n>)")
+    parser.add_argument("--pass", dest="pass_name", choices=PASSES, default="forward",
+                        help="Tabulate forward or backward (*_bwd) results (default: %(default)s)")
+    parser.add_argument("--algorithms", default=None,
+                        help="Comma-separated algorithms, in row order (default: forward "
+                             f"{DEFAULT_ALGORITHMS['forward']}; backward {DEFAULT_ALGORITHMS['backward']})")
+    parser.add_argument("--name", default=None, help="Output file stem (default: dense_<pass>_table_N<n>)")
     parser.add_argument("--caption", default=None, help="Override the generated caption")
-    parser.add_argument("--latex-label", default=None, help=r"\label key (default: tab:dense-forward-N<n>)")
+    parser.add_argument("--latex-label", default=None, help=r"\label key (default: tab:dense-<pass>-N<n>)")
     parser.add_argument("--include-partial", action="store_true",
                         help="Use unfinished experiments too, marked with a dagger")
     parser.add_argument("--wide", action="store_true",
@@ -167,15 +173,16 @@ def main() -> int:
     args = parser.parse_args()
 
     labels = [label for label in args.labels.split(",") if label]
-    algorithms = [a for a in args.algorithms.split(",") if a]
+    algorithms = [a for a in (args.algorithms or DEFAULT_ALGORITHMS[args.pass_name]).split(",") if a]
     table, warnings = build_table(args.results_dir, labels, algorithms, args.n, args.include_partial,
-                                  not args.no_bold, args.caption, args.latex_label or f"tab:dense-forward-N{args.n}",
-                                  args.wide)
+                                  not args.no_bold, args.caption,
+                                  args.latex_label or f"tab:dense-{args.pass_name}-N{args.n}",
+                                  args.wide, args.pass_name)
     for warning in warnings:
         print(f"Note: {warning}", file=sys.stderr)
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
-    out = args.output_dir / f"{args.name or f'dense_forward_table_N{args.n}'}.tex"
+    out = args.output_dir / f"{args.name or f'dense_{args.pass_name}_table_N{args.n}'}.tex"
     out.write_text(table)
     print(f"Wrote {out}")
     return 0

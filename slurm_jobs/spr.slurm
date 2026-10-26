@@ -2,6 +2,7 @@
 # Stampede3 Sapphire Rapids (Xeon CPU Max 9480) node (112 cores). Submit from the repository root:
 #   sbatch slurm_jobs/spr.slurm
 #   sbatch --export=ALL,RESUBMIT=1 slurm_jobs/spr.slurm   # keep resubmitting until done
+#   sbatch --export=ALL,PASS=backward,RESUBMIT=1 slurm_jobs/spr.slurm   # backward pass
 # See slurm_jobs/run_benchmark.sh for the settings that can be overridden.
 #SBATCH -J attn_spr
 #SBATCH -p spr

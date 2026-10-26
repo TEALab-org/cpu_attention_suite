@@ -52,7 +52,8 @@ python3 python_scripts/benchmark.py --results-dir /path/outside/repo --label mym
 ```
 
 Results go to `<results-dir>/<label>/` as one JSON file per experiment (`tune/`, `sweep/`,
-`papi/`), plus `tune/best.json` and per-run machine info in `runs/`. Each file is updated after
+`papi/`), plus `tune/best.json` and per-run machine info in `runs/`. `--pass backward` benchmarks
+the backward solvers instead, into `tune_backward/`, `sweep_backward/` and `papi_backward/`. Each file is updated after
 every repetition, so an interrupted run resumes where it stopped when rerun with the same
 command (exit code 3 means "stopped early, rerun to continue"). Useful options: `--threads`
 (default: all physical cores), `--max-n`, `--algorithms`, `--phases`, `--time-limit`,
@@ -81,10 +82,21 @@ This needs a Linux machine with hardware counters available to user processes
 
 ```bash
 sbatch --export=ALL,RESUBMIT=1 slurm_jobs/skx.slurm
+sbatch --export=ALL,PASS=backward,RESUBMIT=1 slurm_jobs/skx.slurm
 ```
 
 Results go to `$SCRATCH/cpu_attention_results/<label>`. Settings such as `REPS`, `MAX_N`,
 `MODULES` and `RESULTS_DIR` are documented at the top of `slurm_jobs/run_benchmark.sh`.
+
+### Figures and tables
+
+```bash
+python python_scripts/plot_results.py --results-dir <results-dir> --output-dir <out> [--normalize] [--pass backward]
+python python_scripts/make_table.py --results-dir <results-dir> --output-dir <out> [--n 1048576] [--pass backward]
+```
+
+`plot_results.py` draws runtime and L1/L2/L3 misses over N with one column per architecture;
+`--normalize` divides by N^2. `make_table.py` writes a LaTeX (booktabs, multirow) table at one N.
 
 ## Licenses
 

@@ -10,7 +10,9 @@
 #   REPS             Timed repetitions per experiment (default: 10)
 #   PAPI_REPS        Repetitions per PAPI experiment (default: 3)
 #   PHASES           Driver phases (default: build,tune,sweep,papi)
-#   ALGORITHMS       Solvers to tune and sweep (default: fa2,summary,query,hybrid)
+#   PASS             forward or backward (default: forward); backward results go to *_backward/
+#   ALGORITHMS       Solvers to tune and sweep (default: fa2,summary,query,hybrid for forward,
+#                    fa2_bwd,standard_bwd for backward)
 #   MAX_N            Largest sweep size (default: 1048576 = 2^20)
 #   MAX_REP_SECONDS  Skip experiments projected to exceed this per repetition (default: unset)
 #   EXTRA_ARGS       Any further benchmark.py arguments
@@ -36,13 +38,21 @@ if [[ -n "${SLURM_JOB_ID:-}" ]]; then
   fi
 fi
 
+PASS="${PASS:-forward}"
+if [[ "$PASS" == "backward" ]]; then
+  ALGORITHMS="${ALGORITHMS:-fa2_bwd,standard_bwd}"
+else
+  ALGORITHMS="${ALGORITHMS:-fa2,summary,query,hybrid}"
+fi
+
 args=(
   --results-dir "$RESULTS_DIR"
+  --pass "$PASS"
   --label "$label"
   --reps "${REPS:-10}"
   --papi-reps "${PAPI_REPS:-3}"
   --phases "${PHASES:-build,tune,sweep,papi}"
-  --algorithms "${ALGORITHMS:-fa2,summary,query,hybrid}"
+  --algorithms "$ALGORITHMS"
   --max-n "${MAX_N:-1048576}"
   --papi
   "${time_limit_args[@]}"
@@ -58,6 +68,7 @@ status=$?
 # Exit code 3 means "stopped at the time limit, rerun to resume"
 if [[ $status -eq 3 && "${RESUBMIT:-0}" == "1" && -n "${SLURM_JOB_ID:-}" ]]; then
   echo "Resubmitting to continue..."
+  # --export=ALL carries PASS, ALGORITHMS, etc. into the resubmitted job
   (cd "$REPO" && sbatch --export=ALL "slurm_jobs/${label}.slurm")
 fi
 exit $status

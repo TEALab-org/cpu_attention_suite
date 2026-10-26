@@ -29,6 +29,25 @@ PAPI_EVENTS = [
 ]
 
 
+PASSES = ("forward", "backward")
+
+
+def result_kind(kind: str, pass_name: str) -> str:
+    """Result directory for a phase, matching benchmark.py: sweep/ or sweep_backward/, etc."""
+    return kind if pass_name == "forward" else f"{kind}_{pass_name}"
+
+
+def algorithm_key(base: str, pass_name: str) -> str:
+    """Solver name for an algorithm in a pass: fa2 -> fa2_bwd for the backward pass."""
+    return base if pass_name == "forward" else f"{base}_bwd"
+
+
+def display_name(key: str) -> str:
+    """Display name shared by an algorithm's forward and backward solvers."""
+    base = key[: -len("_bwd")] if key.endswith("_bwd") else key
+    return dict(ALGORITHMS).get(base, key)
+
+
 def load_records(directory: Path, include_partial: bool) -> List[dict]:
     """Experiment records in a tune/sweep/papi directory; finished ones only unless include_partial."""
     records = []
@@ -45,7 +64,9 @@ def load_records(directory: Path, include_partial: bool) -> List[dict]:
 
 
 def machine_threads(results_dir: Path, label: str) -> Optional[int]:
-    for path in sorted((results_dir / label / "sweep").glob("*.json")):
+    paths = sorted((results_dir / label / "sweep").glob("*.json"))
+    paths += sorted((results_dir / label / result_kind("sweep", "backward")).glob("*.json"))
+    for path in paths:
         try:
             with open(path) as f:
                 threads = json.load(f).get("threads")

@@ -10,6 +10,9 @@ Runs on one machine (one architecture) per invocation, in these phases:
   papi   With --papi: build a PAPI-enabled solver and repeat the sweep collecting hardware
          cache-miss counters instead of (well, as well as) timings.
 
+--pass selects the forward solvers (default) or the backward (*_bwd) solvers. Backward results
+go to tune_backward/, sweep_backward/ and papi_backward/, so the two passes never mix.
+
 Every experiment writes one JSON file, updated after each repetition, so an interrupted run
 loses at most the repetition in flight; rerunning the same command resumes where it stopped.
 Results live under <results-dir>/<label>/ and are never written into the repository.
@@ -49,8 +52,11 @@ EXIT_DONE = 0
 EXIT_ERROR = 1
 EXIT_INCOMPLETE = 3  # Stopped by --time-limit or a signal; rerun to resume
 
-# Sweep order: earlier algorithms run first at each N
-DEFAULT_ALGORITHMS = ["fa2", "summary", "query", "hybrid", "streamed", "standard"]
+# Sweep order per pass: earlier algorithms run first at each N
+DEFAULT_ALGORITHMS = {
+    "forward": ["fa2", "summary", "query", "hybrid", "streamed", "standard"],
+    "backward": ["fa2_bwd", "standard_bwd"],
+}
 
 # Statuses that are final for an experiment (complete or deliberately not run)
 FINAL_STATUSES = {"complete", "skipped"}
@@ -151,6 +157,8 @@ ALGORITHM_PARAMS = {
     "summary": ["b", "p"],
     "query": ["b", "g"],
     "hybrid": ["b", "g", "p"],
+    "standard_bwd": [],
+    "fa2_bwd": ["b"],
 }
 PARAM_FLAGS = {"b": "-b", "g": "-g", "p": "-p"}
 
@@ -167,7 +175,7 @@ def powers_of_4_near(threads: int) -> List[int]:
 def tuning_grid(algorithm: str, threads: int) -> List[Dict[str, int]]:
     blocks = [16, 32, 64, 128, 256]
     grains = [64, 128, 256, 512, 1024, 2048]
-    if algorithm == "fa2":
+    if algorithm in ("fa2", "fa2_bwd"):
         return [{"b": b} for b in blocks + [512]]
     if algorithm == "summary":
         return [{"b": b, "p": p} for b, p in itertools.product(blocks, powers_of_4_near(threads))]
@@ -192,7 +200,22 @@ def summary_levels(algorithm: str, p: int) -> int:
     return levels
 
 
+def is_backward(algorithm: str) -> bool:
+    return algorithm.endswith("_bwd")
+
+
+def result_dir_name(kind: str, pass_name: str) -> str:
+    """tune/sweep/papi for the forward pass (unchanged layout), tune_backward/... for backward."""
+    return kind if pass_name == "forward" else f"{kind}_{pass_name}"
+
+
 def estimated_bytes(algorithm: str, n: int, params: Dict[str, int], threads: int) -> int:
+    if is_backward(algorithm):
+        # Q, K, V, dO, O, L, dQ, dK, dV, plus the gradients copied between repetitions
+        base = 12 * n * D * BYTES_F32
+        if algorithm == "standard_bwd":
+            return base + 2 * n * n * BYTES_F32  # P and dS
+        return base
     base = 5 * n * D * BYTES_F32  # Q, K, V, O, plus the copy assigned between repetitions
     if algorithm == "standard":
         return base + n * n * BYTES_F32
@@ -280,6 +303,7 @@ class Runner:
     def record_base(self, exp: Experiment, solver: Path) -> dict:
         record = {
             "experiment": exp.kind,
+            "pass": self.args.pass_name,
             "name": exp.algorithm,
             "N": exp.n,
             "n": exp.n,
@@ -421,23 +445,28 @@ class Runner:
 
 
 def build_solver(out: Path, march: str, papi: bool) -> bool:
-    env = {**os.environ, "OUT": str(out), "MARCH": march, "PAPI": "1" if papi else "0"}
+    # Build beside the target and rename into place, so another job (e.g. the other pass on
+    # the same machine label) that is running the old binary keeps its copy untouched
+    tmp = out.with_name(f"{out.name}.tmp{os.getpid()}")
+    env = {**os.environ, "OUT": str(tmp), "MARCH": march, "PAPI": "1" if papi else "0"}
     print(f"Building {out} (march={march}{', PAPI' if papi else ''})", flush=True)
     proc = subprocess.run([str(REPO_ROOT / "build_solvers_release.sh")], env=env, cwd=REPO_ROOT,
                           capture_output=True, text=True)
     if proc.returncode != 0:
+        tmp.unlink(missing_ok=True)
         print(f"Build failed:\n{proc.stdout}{proc.stderr}", file=sys.stderr)
         return False
+    os.replace(tmp, out)
     return True
 
 
 def tune_phase(runner: Runner, solver: Path, algorithms: List[str]) -> Dict[str, Dict[str, int]]:
     args = runner.args
-    tune_dir = runner.machine_dir / "tune"
+    tune_dir = runner.machine_dir / result_dir_name("tune", args.pass_name)
     best_path = tune_dir / "best.json"
     best = load_json(best_path) or {}
 
-    print(f"\n== Tuning at N = {args.tune_n}")
+    print(f"\n== Tuning ({args.pass_name}) at N = {args.tune_n}")
     for algorithm in algorithms:
         if algorithm in best:
             continue
@@ -470,8 +499,8 @@ def warmup_for(args: argparse.Namespace, n: int) -> int:
 def sweep_phase(runner: Runner, solver: Path, kind: str, best: Dict[str, Dict[str, int]],
                 algorithms: List[str], reps: int, extra_args: List[str] = ()) -> None:
     args = runner.args
-    out_dir = runner.machine_dir / kind
-    print(f"\n== {kind} over N = {', '.join(str(n) for n in args.sizes)}")
+    out_dir = runner.machine_dir / result_dir_name(kind, args.pass_name)
+    print(f"\n== {kind} ({args.pass_name}) over N = {', '.join(str(n) for n in args.sizes)}")
     for n in args.sizes:
         for algorithm in algorithms:
             if algorithm not in best:
@@ -484,6 +513,7 @@ def write_run_info(machine_dir: Path, args: argparse.Namespace, threads: int, co
     info = {
         "started": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
         "label": args.label,
+        "pass": args.pass_name,
         "hostname": socket.gethostname(),
         "cpu_model": cpu_model(),
         "threads": threads,
@@ -526,8 +556,12 @@ def main() -> int:
     parser.add_argument("--reps", type=int, default=10, help="Timed repetitions per experiment (default: %(default)s)")
     parser.add_argument("--warmup-max-n", type=int, default=2**18,
                         help="Run one untimed warmup only for N <= this (default: %(default)s)")
-    parser.add_argument("--algorithms", default=",".join(DEFAULT_ALGORITHMS),
-                        help="Comma-separated solvers to benchmark (default: %(default)s)")
+    parser.add_argument("--pass", dest="pass_name", choices=["forward", "backward"], default="forward",
+                        help="Benchmark the forward or the backward (*_bwd) solvers (default: %(default)s)")
+    parser.add_argument("--algorithms", default=None,
+                        help="Comma-separated solvers to benchmark (default: forward "
+                             f"{','.join(DEFAULT_ALGORITHMS['forward'])}; backward "
+                             f"{','.join(DEFAULT_ALGORITHMS['backward'])})")
     parser.add_argument("--phases", default="build,tune,sweep,papi",
                         help="Comma-separated phases to run (default: %(default)s; papi also needs --papi)")
     parser.add_argument("--tune-n", type=int, default=2**16, help="Problem size for tuning (default: %(default)s)")
@@ -555,10 +589,14 @@ def main() -> int:
     args.label = args.label or default_label()
     args.sizes = parse_sizes(args)
     phases = set(args.phases.split(","))
-    algorithms = [a for a in args.algorithms.split(",") if a]
+    algorithms = ([a for a in args.algorithms.split(",") if a] if args.algorithms
+                  else DEFAULT_ALGORITHMS[args.pass_name])
     unknown = [a for a in algorithms if a not in ALGORITHM_PARAMS]
     if unknown:
         parser.error(f"unknown algorithms: {', '.join(unknown)}")
+    wrong_pass = [a for a in algorithms if is_backward(a) != (args.pass_name == "backward")]
+    if wrong_pass:
+        parser.error(f"not {args.pass_name} algorithms: {', '.join(wrong_pass)} (see --pass)")
 
     machine_dir = (args.results_dir / args.label).resolve()
     machine_dir.mkdir(parents=True, exist_ok=True)
@@ -566,7 +604,7 @@ def main() -> int:
     commit = git_commit()
     deadline = time.time() + args.time_limit if args.time_limit else None
 
-    print(f"Results: {machine_dir}\nThreads: {threads}  Reps: {args.reps}  Commit: {commit}")
+    print(f"Results: {machine_dir}\nPass: {args.pass_name}  Threads: {threads}  Reps: {args.reps}  Commit: {commit}")
     write_run_info(machine_dir, args, threads, commit)
 
     runner = Runner(args, machine_dir, threads, commit, deadline)
@@ -585,7 +623,7 @@ def main() -> int:
             print(f"Solver not found: {solver} (run the build phase)", file=sys.stderr)
             return EXIT_ERROR
 
-        best = load_json(machine_dir / "tune" / "best.json") or {}
+        best = load_json(machine_dir / result_dir_name("tune", args.pass_name) / "best.json") or {}
         if "tune" in phases:
             best = tune_phase(runner, solver, algorithms)
         best = {a: p for a, p in best.items() if a in algorithms}

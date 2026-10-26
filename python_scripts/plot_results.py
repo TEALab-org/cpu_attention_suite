@@ -36,10 +36,11 @@ import matplotlib.pyplot as plt  # noqa: E402
 from matplotlib.ticker import FixedLocator, FuncFormatter, NullFormatter  # noqa: E402
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from results_io import ALGORITHMS, load_records, machine_title  # noqa: E402
+from results_io import ALGORITHMS, PASSES, algorithm_key, load_records, machine_title, result_kind  # noqa: E402
 
 # Each algorithm keeps a fixed colour/marker (by its slot in results_io.ALGORITHMS) in every
-# panel and figure, regardless of which algorithms have data.
+# panel and figure, regardless of which algorithms have data; a backward solver (fa2_bwd)
+# shares its forward counterpart's slot.
 # Validated categorical palette, slots 1-6 in order (blue, orange, aqua, yellow, magenta, green).
 # Markers are a secondary encoding: six crossing lines need more than hue alone.
 COLORS = ["#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4", "#008300"]
@@ -114,7 +115,8 @@ def style_axis(ax) -> None:
     ax.tick_params(colors=MUTED, labelcolor=TEXT, labelsize=8)
 
 
-def plot(results_dir: Path, labels: List[str], include_partial: bool, usetex: bool, normalize: bool):
+def plot(results_dir: Path, labels: List[str], include_partial: bool, usetex: bool, normalize: bool,
+         pass_name: str):
     if usetex:
         plt.rcParams.update({"text.usetex": True, "font.family": "serif",
                              "font.serif": ["Computer Modern Serif"]})
@@ -125,13 +127,14 @@ def plot(results_dir: Path, labels: List[str], include_partial: bool, usetex: bo
     all_n = set()
     for label in labels:
         for kind in {kind for kind, _, _ in ROWS}:
-            records = load_records(results_dir / label / kind, include_partial)
+            records = load_records(results_dir / label / result_kind(kind, pass_name), include_partial)
             data[(label, kind)] = records
             all_n.update(r["N"] for r in records)
 
     n_rows, n_cols = len(ROWS), len(labels)
     fig = plt.figure(figsize=(3.6 * n_cols, 2.6 * n_rows + 0.8))
-    gs = fig.add_gridspec(n_rows, n_cols, hspace=0.18, wspace=0.12, top=0.90, bottom=0.07, left=0.08, right=0.98)
+    gs = fig.add_gridspec(n_rows, n_cols, hspace=0.18, wspace=0.12, top=0.90, bottom=0.07,
+                          left=min(0.24, 0.24 / n_cols), right=0.98)  # Same absolute margin for any column count
 
     axes = [[None] * n_cols for _ in range(n_rows)]
     for r in range(n_rows):
@@ -147,7 +150,8 @@ def plot(results_dir: Path, labels: List[str], include_partial: bool, usetex: bo
             ax = axes[r][c]
             style_axis(ax)
             plotted = False
-            for slot, (algorithm, display) in enumerate(ALGORITHMS):
+            for slot, (base, display) in enumerate(ALGORITHMS):
+                algorithm = algorithm_key(base, pass_name)
                 series = collect(data[(label, kind)], algorithm, metric, normalize)
                 if series is None:
                     continue
@@ -195,11 +199,11 @@ def plot(results_dir: Path, labels: List[str], include_partial: bool, usetex: bo
             ax.xaxis.set_minor_formatter(NullFormatter())
             ax.set_xlim(min(ticks) / 1.3, max(ticks) * 1.3)
 
-    ordered = [handles[a] for a, _ in ALGORITHMS if a in handles]
+    ordered = [handles[algorithm_key(a, pass_name)] for a, _ in ALGORITHMS if algorithm_key(a, pass_name) in handles]
     if ordered:
         fig.legend(ordered, [h.get_label() for h in ordered], loc="upper center", ncol=len(ordered),
                    frameon=False, fontsize=9, bbox_to_anchor=(0.5, 0.985), labelcolor=TEXT)
-    fig.text(0.5, 0.935, r"Dense forward pass, $d = 64$" + (" (hollow markers: incomplete repetitions)"
+    fig.text(0.5, 0.935, rf"Dense {pass_name} pass, $d = 64$" + (" (hollow markers: incomplete repetitions)"
              if include_partial else ""), ha="center", color=MUTED, fontsize=9)
     return fig
 
@@ -210,7 +214,9 @@ def main() -> int:
     parser.add_argument("--output-dir", type=Path, required=True, help="Directory to write figures into")
     parser.add_argument("--labels", default="skx,icx,spr",
                         help="Comma-separated machine labels, one column each (default: %(default)s)")
-    parser.add_argument("--name", default="dense_forward", help="Output file stem (default: %(default)s)")
+    parser.add_argument("--pass", dest="pass_name", choices=PASSES, default="forward",
+                        help="Plot forward or backward (*_bwd) results (default: %(default)s)")
+    parser.add_argument("--name", default=None, help="Output file stem (default: dense_<pass>)")
     parser.add_argument("--formats", default="pdf,png", help="Comma-separated formats (default: %(default)s)")
     parser.add_argument("--include-partial", action="store_true",
                         help="Also plot experiments that have not finished all repetitions (hollow markers)")
@@ -224,8 +230,8 @@ def main() -> int:
     if missing:
         print(f"Warning: no results for {', '.join(missing)} under {args.results_dir}", file=sys.stderr)
 
-    fig = plot(args.results_dir, labels, args.include_partial, args.usetex, args.normalize)
-    name = args.name + ("_normalized" if args.normalize else "")
+    fig = plot(args.results_dir, labels, args.include_partial, args.usetex, args.normalize, args.pass_name)
+    name = (args.name or f"dense_{args.pass_name}") + ("_normalized" if args.normalize else "")
     args.output_dir.mkdir(parents=True, exist_ok=True)
     for fmt in args.formats.split(","):
         out = args.output_dir / f"{name}.{fmt}"
