@@ -14,7 +14,14 @@ ALGORITHMS = [
     ("summary", "ParallelSummary"),
     ("query", "QueryParallel"),
     ("hybrid", "Hybrid"),
+    ("owned", "ParallelOwned"),  # Backward only (owned_bwd)
 ]
+
+# Backward solvers named as in the paper; others share their forward counterpart's name
+BACKWARD_NAMES = {
+    "summary_bwd": "ParallelDenseBackward",
+    "owned_bwd": "ParallelOwnedBackward",
+}
 
 ARCHITECTURES = {
     "skx": "Skylake",
@@ -43,7 +50,9 @@ def algorithm_key(base: str, pass_name: str) -> str:
 
 
 def display_name(key: str) -> str:
-    """Display name shared by an algorithm's forward and backward solvers."""
+    """Display name shared by an algorithm's forward and backward solvers (or its paper name)."""
+    if key in BACKWARD_NAMES:
+        return BACKWARD_NAMES[key]
     base = key[: -len("_bwd")] if key.endswith("_bwd") else key
     return dict(ALGORITHMS).get(base, key)
 

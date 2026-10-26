@@ -26,7 +26,7 @@ from results_io import (  # noqa: E402
     ARCHITECTURES, PAPI_EVENTS, PASSES, display_name, load_records, machine_threads, result_kind,
 )
 
-DEFAULT_ALGORITHMS = {"forward": "fa2,summary,query,hybrid", "backward": "fa2_bwd,standard_bwd"}
+DEFAULT_ALGORITHMS = {"forward": "fa2,summary,query,hybrid", "backward": "fa2_bwd,summary_bwd,owned_bwd,hybrid_bwd"}
 
 # (key, short header); "time" comes from the timing sweep, the rest from the PAPI sweep
 COLUMNS = [("time", "Runtime")] + [(event, level) for event, level in PAPI_EVENTS]

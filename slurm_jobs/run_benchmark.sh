@@ -12,7 +12,7 @@
 #   PHASES           Driver phases (default: build,tune,sweep,papi)
 #   PASS             forward or backward (default: forward); backward results go to *_backward/
 #   ALGORITHMS       Solvers to tune and sweep (default: fa2,summary,query,hybrid for forward,
-#                    fa2_bwd,standard_bwd for backward)
+#                    fa2_bwd,summary_bwd,owned_bwd,hybrid_bwd,standard_bwd for backward)
 #   MAX_N            Largest sweep size (default: 1048576 = 2^20)
 #   MAX_REP_SECONDS  Skip experiments projected to exceed this per repetition (default: unset)
 #   EXTRA_ARGS       Any further benchmark.py arguments
@@ -40,7 +40,7 @@ fi
 
 PASS="${PASS:-forward}"
 if [[ "$PASS" == "backward" ]]; then
-  ALGORITHMS="${ALGORITHMS:-fa2_bwd,standard_bwd}"
+  ALGORITHMS="${ALGORITHMS:-fa2_bwd,summary_bwd,owned_bwd,hybrid_bwd,standard_bwd}"
 else
   ALGORITHMS="${ALGORITHMS:-fa2,summary,query,hybrid}"
 fi

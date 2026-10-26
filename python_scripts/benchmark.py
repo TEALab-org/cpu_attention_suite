@@ -55,7 +55,7 @@ EXIT_INCOMPLETE = 3  # Stopped by --time-limit or a signal; rerun to resume
 # Sweep order per pass: earlier algorithms run first at each N
 DEFAULT_ALGORITHMS = {
     "forward": ["fa2", "summary", "query", "hybrid", "streamed", "standard"],
-    "backward": ["fa2_bwd", "standard_bwd"],
+    "backward": ["fa2_bwd", "summary_bwd", "owned_bwd", "hybrid_bwd", "standard_bwd"],
 }
 
 # Statuses that are final for an experiment (complete or deliberately not run)
@@ -159,6 +159,9 @@ ALGORITHM_PARAMS = {
     "hybrid": ["b", "g", "p"],
     "standard_bwd": [],
     "fa2_bwd": ["b"],
+    "summary_bwd": ["b", "p"],
+    "owned_bwd": ["b", "g"],
+    "hybrid_bwd": ["b", "g", "p"],
 }
 PARAM_FLAGS = {"b": "-b", "g": "-g", "p": "-p"}
 
@@ -177,11 +180,11 @@ def tuning_grid(algorithm: str, threads: int) -> List[Dict[str, int]]:
     grains = [64, 128, 256, 512, 1024, 2048]
     if algorithm in ("fa2", "fa2_bwd"):
         return [{"b": b} for b in blocks + [512]]
-    if algorithm == "summary":
+    if algorithm in ("summary", "summary_bwd"):
         return [{"b": b, "p": p} for b, p in itertools.product(blocks, powers_of_4_near(threads))]
-    if algorithm == "query":
+    if algorithm in ("query", "owned_bwd"):
         return [{"b": b, "g": g} for b, g in itertools.product(blocks[:4], grains) if g >= b]
-    if algorithm == "hybrid":
+    if algorithm in ("hybrid", "hybrid_bwd"):
         return [{"b": b, "g": g, "p": threads} for b, g in itertools.product(blocks[:4], grains) if g >= b]
     return [{}]
 
@@ -189,11 +192,11 @@ def tuning_grid(algorithm: str, threads: int) -> List[Dict[str, int]]:
 def summary_levels(algorithm: str, p: int) -> int:
     """Number of ParallelSummary levels (each doubles the auxiliary summary memory)."""
     levels = 0
-    if algorithm == "summary":
+    if algorithm in ("summary", "summary_bwd"):
         while p > 1:
             p //= 4
             levels += 1
-    elif algorithm == "hybrid":
+    elif algorithm in ("hybrid", "hybrid_bwd"):
         while p > 0 and p % 4 == 0:
             p //= 4
             levels += 1
@@ -215,6 +218,10 @@ def estimated_bytes(algorithm: str, n: int, params: Dict[str, int], threads: int
         base = 12 * n * D * BYTES_F32
         if algorithm == "standard_bwd":
             return base + 2 * n * n * BYTES_F32  # P and dS
+        if algorithm in ("summary_bwd", "hybrid_bwd"):
+            # Each summary level doubles the private (dQ, dK, dV) gradient buffers
+            levels = summary_levels(algorithm, params.get("p", 1))
+            return base + 3 * (2 ** levels) * n * D * BYTES_F32
         return base
     base = 5 * n * D * BYTES_F32  # Q, K, V, O, plus the copy assigned between repetitions
     if algorithm == "standard":

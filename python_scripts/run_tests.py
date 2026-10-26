@@ -116,6 +116,19 @@ def backward_runs(workers: list[int]) -> list[SolverRun]:
     for w in workers:
         runs.append(SolverRun("standard_bwd", workers=w))
         runs += [SolverRun("fa2_bwd", ("-b", str(b)), w) for b in (16, 64, 100)]
+        runs += [
+            SolverRun("summary_bwd", ("-b", str(b), "-p", str(p)), w)
+            for b, p in itertools.product((16, 64), (1, 4, 16))
+        ]
+        runs += [
+            SolverRun("owned_bwd", ("-b", str(b), "-g", str(g)), w)
+            for b, g in itertools.product((16, 64), (16, 64, 256))
+        ]
+        # p = 3, 12, 48 exercise the switch to owned traversals after 0, 1 and 2 summary levels
+        runs += [
+            SolverRun("hybrid_bwd", ("-b", str(b), "-g", "64", "-p", str(p)), w)
+            for b, p in itertools.product((16, 64), (1, 3, 4, 12, 16, 48))
+        ]
     return runs
 
 
@@ -222,6 +235,19 @@ def check(results: Results, label: str, metrics: tuple[float, float], tols: tupl
         print(f"  FAIL  {line}")
 
 
+def expect_rejected(runner: SolverRunner, run: SolverRun, problem_path: Path, out_path: Path,
+                    results: Results, verbose: bool) -> None:
+    """Checks that the solver refuses an invalid configuration (e.g. a non-power-of-4 p)."""
+    proc = runner.run(run, problem_path, out_path)
+    if proc.returncode == 0:
+        results.failures.append(f"expected non-zero exit  {run.label}")
+        print(f"  FAIL  expected non-zero exit  {run.label}")
+    else:
+        results.passed += 1
+        if verbose:
+            print(f"  ok    rejected as expected  {run.label}")
+
+
 def run_problem(runner: SolverRunner, problem: Problem, runs: list[SolverRun], data_dir: Path,
                 results: Results, verbose: bool) -> None:
     out_path = data_dir / f"out_{problem.name}.npy"
@@ -243,6 +269,8 @@ def run_problem(runner: SolverRunner, problem: Problem, runs: list[SolverRun], d
     if backward:
         problem_path, qkvdo = load_problem(problem, data_dir, with_dO=True)
         grads_ref = numpy_attention_backward(qkvdo)
+        if "summary_bwd" in {r.algorithm for r in backward}:
+            expect_rejected(runner, SolverRun("summary_bwd", ("-p", "8")), problem_path, out_path, results, verbose)
         for run in backward:
             out = execute(run, problem_path)
             if out is None:
@@ -259,16 +287,8 @@ def run_forward(runner: SolverRunner, problem: Problem, runs: list[SolverRun], d
                 execute, results: Results, verbose: bool) -> None:
     problem_path, qkv = load_problem(problem, data_dir)
 
-    bad_p = SolverRun("summary", ("-p", "8"))
     if "summary" in {r.algorithm for r in runs}:
-        proc = runner.run(bad_p, problem_path, out_path)
-        if proc.returncode == 0:
-            results.failures.append(f"expected non-zero exit  {bad_p.label}")
-            print(f"  FAIL  expected non-zero exit  {bad_p.label}")
-        else:
-            results.passed += 1
-            if verbose:
-                print(f"  ok    rejected as expected  {bad_p.label}")
+        expect_rejected(runner, SolverRun("summary", ("-p", "8")), problem_path, out_path, results, verbose)
 
     ref_run = SolverRun("reference")
     o_ref = execute(ref_run, problem_path)

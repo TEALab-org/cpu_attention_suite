@@ -36,15 +36,17 @@ import matplotlib.pyplot as plt  # noqa: E402
 from matplotlib.ticker import FixedLocator, FuncFormatter, NullFormatter  # noqa: E402
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from results_io import ALGORITHMS, PASSES, algorithm_key, load_records, machine_title, result_kind  # noqa: E402
+from results_io import (  # noqa: E402
+    ALGORITHMS, PASSES, algorithm_key, display_name, load_records, machine_title, result_kind,
+)
 
 # Each algorithm keeps a fixed colour/marker (by its slot in results_io.ALGORITHMS) in every
 # panel and figure, regardless of which algorithms have data; a backward solver (fa2_bwd)
 # shares its forward counterpart's slot.
-# Validated categorical palette, slots 1-6 in order (blue, orange, aqua, yellow, magenta, green).
-# Markers are a secondary encoding: six crossing lines need more than hue alone.
-COLORS = ["#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4", "#008300"]
-MARKERS = ["o", "s", "^", "D", "v", "P"]
+# Validated categorical palette, slots 1-7 in order (blue, orange, aqua, yellow, magenta, green,
+# violet). Markers are a secondary encoding: several crossing lines need more than hue alone.
+COLORS = ["#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4", "#008300", "#6250d6"]
+MARKERS = ["o", "s", "^", "D", "v", "P", "X"]
 
 ROWS = [
     # (kind, metric key, y label)
@@ -150,7 +152,7 @@ def plot(results_dir: Path, labels: List[str], include_partial: bool, usetex: bo
             ax = axes[r][c]
             style_axis(ax)
             plotted = False
-            for slot, (base, display) in enumerate(ALGORITHMS):
+            for slot, (base, _) in enumerate(ALGORITHMS):
                 algorithm = algorithm_key(base, pass_name)
                 series = collect(data[(label, kind)], algorithm, metric, normalize)
                 if series is None:
@@ -160,7 +162,7 @@ def plot(results_dir: Path, labels: List[str], include_partial: bool, usetex: bo
                        [hi - m for m, hi in zip(series.median, series.high)]]
                 line = ax.errorbar(series.n, series.median, yerr=err, color=COLORS[slot],
                                    marker=MARKERS[slot], markersize=4.5, linewidth=1.6,
-                                   elinewidth=0.9, capsize=2, label=display,
+                                   elinewidth=0.9, capsize=2, label=display_name(algorithm),
                                    markeredgecolor="white", markeredgewidth=0.6)
                 if any(series.partial):
                     # Hollow markers flag points with fewer repetitions than requested
@@ -200,10 +202,23 @@ def plot(results_dir: Path, labels: List[str], include_partial: bool, usetex: bo
             ax.set_xlim(min(ticks) / 1.3, max(ticks) * 1.3)
 
     ordered = [handles[algorithm_key(a, pass_name)] for a, _ in ALGORITHMS if algorithm_key(a, pass_name) in handles]
+    # One legend row if it fits; otherwise wrap onto as few rows as fit the figure width, and move
+    # the subtitle and panels below the legend's measured bottom edge
+    subtitle_y = 0.935
     if ordered:
-        fig.legend(ordered, [h.get_label() for h in ordered], loc="upper center", ncol=len(ordered),
-                   frameon=False, fontsize=9, bbox_to_anchor=(0.5, 0.985), labelcolor=TEXT)
-    fig.text(0.5, 0.935, rf"Dense {pass_name} pass, $d = 64$" + (" (hollow markers: incomplete repetitions)"
+        renderer = fig.canvas.get_renderer()
+        legend = None
+        for ncol in range(len(ordered), 0, -1):
+            if legend is not None:
+                legend.remove()
+            legend = fig.legend(ordered, [h.get_label() for h in ordered], loc="upper center", ncol=ncol,
+                                frameon=False, fontsize=9, bbox_to_anchor=(0.5, 0.985), labelcolor=TEXT)
+            if legend.get_window_extent(renderer).width <= 0.98 * fig.bbox.width:
+                break
+        if ncol < len(ordered):
+            subtitle_y = legend.get_window_extent(renderer).y0 / fig.bbox.height - 0.012
+            gs.update(top=subtitle_y - 0.035)
+    fig.text(0.5, subtitle_y, rf"Dense {pass_name} pass, $d = 64$" + (" (hollow markers: incomplete repetitions)"
              if include_partial else ""), ha="center", color=MUTED, fontsize=9)
     return fig
 

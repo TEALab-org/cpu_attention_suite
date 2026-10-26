@@ -16,6 +16,7 @@
 #include "flash_attention_2.hpp"
 #include "flash_attention_2_backward.hpp"
 #include "hybrid_attention.hpp"
+#include "parallel_backward.hpp"
 #include "parallel_summary.hpp"
 #include "problem_generator.hpp"
 #include "query_parallel.hpp"
@@ -113,6 +114,7 @@ struct BackwardEntry {
     const char* name;
     const char* description;
     BackwardFn run;
+    bool needs_power_of_4_p = false;
 };
 
 const std::vector<BackwardEntry>& backward_registry() {
@@ -125,6 +127,19 @@ const std::vector<BackwardEntry>& backward_registry() {
          [](const AttentionProblem& P, const AttentionMatrixf& O, const Eigen::VectorXf& L, const SolverConfig& c) {
              return flash_attention_2_backward_lockfree_opencilk(P.Q, P.K, P.V, O, P.dO, L, /*causal=*/false,
                                                                   c.block_size, c.block_size);
+         }},
+        {"summary_bwd", "ParallelDenseBackward, private gradient summaries (uses -b, -p)",
+         [](const AttentionProblem& P, const AttentionMatrixf& O, const Eigen::VectorXf& L, const SolverConfig& c) {
+             return parallel_dense_backward(P.Q, P.K, P.V, O, P.dO, L, c.p, c.block_size);
+         },
+         /*needs_power_of_4_p=*/true},
+        {"owned_bwd", "ParallelOwnedBackward, two traversals with disjoint outputs (uses -b, -g)",
+         [](const AttentionProblem& P, const AttentionMatrixf& O, const Eigen::VectorXf& L, const SolverConfig& c) {
+             return parallel_owned_backward(P.Q, P.K, P.V, O, P.dO, L, c.block_size, c.grain);
+         }},
+        {"hybrid_bwd", "Summary recursion while p splits 4 ways, then owned (uses -b, -g, -p)",
+         [](const AttentionProblem& P, const AttentionMatrixf& O, const Eigen::VectorXf& L, const SolverConfig& c) {
+             return hybrid_backward(P.Q, P.K, P.V, O, P.dO, L, c.p, c.block_size, c.grain);
          }},
     };
     return registry;
@@ -167,8 +182,8 @@ void print_usage(const char* argv0) {
         << "      --random N      Generate a uniform [-1, 1) problem of length N instead of loading one\n"
         << "      --seed S        Seed for --random (default 0)\n"
         << "  -b, --block-size B  Tile / base case size (default 64)\n"
-        << "  -g, --grain G       Query-parallel serial cutoff on |I| (default 256)\n"
-        << "  -p, --p P           Processor budget for summary (power of 4) and hybrid (default: nworkers)\n"
+        << "  -g, --grain G       Query-parallel / owned serial cutoff (default 256)\n"
+        << "  -p, --p P           Processor budget for summary* (power of 4) and hybrid* (default: nworkers)\n"
         << "  -r, --reps R        Timed repetitions (default 1)\n"
         << "  -w, --warmup W      Untimed warmup runs (default 0)\n"
         << "  -o, --output PATH   Write the last run's O, or stacked (3, N, 64) [dQ, dK, dV], to PATH (.npy)\n"
@@ -298,8 +313,9 @@ int main(int argc, char** argv) {
     if (config.p == 0) {
         config.p = nworkers;
     }
-    if (solver != nullptr && solver->needs_power_of_4_p && !is_power_of_4(config.p)) {
-        std::cerr << "Error: " << solver->name << " requires p to be a power of 4, got p = " << config.p
+    const bool needs_power_of_4_p = solver ? solver->needs_power_of_4_p : backward->needs_power_of_4_p;
+    if (needs_power_of_4_p && !is_power_of_4(config.p)) {
+        std::cerr << "Error: " << algorithm_name << " requires p to be a power of 4, got p = " << config.p
                   << (config.p == nworkers ? " (from nworkers; pass -p or set CILK_NWORKERS)" : "") << "\n";
         return 2;
     }
