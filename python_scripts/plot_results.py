@@ -23,7 +23,6 @@ Example:
 from __future__ import annotations
 
 import argparse
-import json
 import statistics
 import sys
 from dataclasses import dataclass
@@ -36,26 +35,15 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 from matplotlib.ticker import FixedLocator, FuncFormatter, NullFormatter  # noqa: E402
 
-# Fixed algorithm order -> fixed colour/marker, so a series keeps its identity in every panel
-# and in every figure regardless of which algorithms have data.
-ALGORITHMS = [
-    ("standard", "Standard"),
-    ("streamed", "Streamed"),
-    ("fa2", "FlashAttention-2"),
-    ("summary", "ParallelSummary"),
-    ("query", "QueryParallel"),
-    ("hybrid", "Hybrid"),
-]
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from results_io import ALGORITHMS, load_records, machine_title  # noqa: E402
+
+# Each algorithm keeps a fixed colour/marker (by its slot in results_io.ALGORITHMS) in every
+# panel and figure, regardless of which algorithms have data.
 # Validated categorical palette, slots 1-6 in order (blue, orange, aqua, yellow, magenta, green).
 # Markers are a secondary encoding: six crossing lines need more than hue alone.
 COLORS = ["#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4", "#008300"]
 MARKERS = ["o", "s", "^", "D", "v", "P"]
-
-ARCHITECTURES = {
-    "skx": "Skylake",
-    "icx": "Ice Lake",
-    "spr": "Sapphire Rapids",
-}
 
 ROWS = [
     # (kind, metric key, y label)
@@ -77,20 +65,6 @@ class Series:
     low: List[float]
     high: List[float]
     partial: List[bool]
-
-
-def load_records(directory: Path, include_partial: bool) -> List[dict]:
-    records = []
-    for path in sorted(directory.glob("*.json")):
-        try:
-            with open(path) as f:
-                rec = json.load(f)
-        except (OSError, json.JSONDecodeError):
-            continue
-        status = rec.get("status")
-        if status == "complete" or (include_partial and status in ("partial", "running") and rec.get("times")):
-            records.append(rec)
-    return records
 
 
 def metric_values(rec: dict, metric: str, normalize: bool) -> List[float]:
@@ -121,20 +95,6 @@ def collect(records: List[dict], algorithm: str, metric: str, normalize: bool) -
         high=[max(v) for v in vals],
         partial=[points[n][1] for n in ns],
     )
-
-
-def machine_title(results_dir: Path, label: str) -> str:
-    name = ARCHITECTURES.get(label, label)
-    threads = None
-    for path in sorted((results_dir / label / "sweep").glob("*.json")):
-        try:
-            with open(path) as f:
-                threads = json.load(f).get("threads")
-        except (OSError, json.JSONDecodeError):
-            continue
-        if threads:
-            break
-    return f"{name} ({threads} cores)" if threads else name
 
 
 def power_of_two_label(x: float, _pos=None) -> str:
