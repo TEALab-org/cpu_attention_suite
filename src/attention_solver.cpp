@@ -1,6 +1,10 @@
-// Unified forward-pass driver: dispatches to every dense attention solver.
+// Unified driver: dispatches to every dense attention solver, forward and backward.
 //
 //   attention_solver <algorithm> (<problem.npy> | --random N) [options]
+//
+// Backward algorithms (*_bwd) also need dO: a (4, N, 64) [Q, K, V, dO] problem file, or
+// generated with --random. Their setup runs the FA2 forward once, untimed, for O and the
+// row-wise log-sum-exp L; only the backward pass itself is timed and counted.
 //
 // Timings go to stdout: one "<t> ms" line per repetition (flushed as each finishes),
 // one JSON object per repetition with --jsonl, or a single JSON summary with --json.
@@ -10,6 +14,7 @@
 #include "attention_utilities.hpp"
 #include "dense_attention.hpp"
 #include "flash_attention_2.hpp"
+#include "flash_attention_2_backward.hpp"
 #include "hybrid_attention.hpp"
 #include "parallel_summary.hpp"
 #include "problem_generator.hpp"
@@ -17,6 +22,7 @@
 #include "standard_attention_parallel.hpp"
 #include "standard_attention_reference.hpp"
 #include "standard_attention_streamed.hpp"
+#include "standard_backward_parallel.hpp"
 
 #include <cilk/cilk_api.h>
 #ifdef ATTENTION_USE_PAPI
@@ -100,6 +106,39 @@ const std::vector<SolverEntry>& solver_registry() {
     return registry;
 }
 
+using BackwardFn = std::function<AttentionGradients(
+    const AttentionProblem&, const AttentionMatrixf& O, const Eigen::VectorXf& L, const SolverConfig&)>;
+
+struct BackwardEntry {
+    const char* name;
+    const char* description;
+    BackwardFn run;
+};
+
+const std::vector<BackwardEntry>& backward_registry() {
+    static const std::vector<BackwardEntry> registry = {
+        {"standard_bwd", "Parallel standard backward, materializes P and dS",
+         [](const AttentionProblem& P, const AttentionMatrixf& O, const Eigen::VectorXf&, const SolverConfig&) {
+             return standard_attention_backward_opencilk(P.Q, P.K, P.V, O, P.dO);
+         }},
+        {"fa2_bwd", "FlashAttention-2 backward, lock-free K/V and Q sweeps (uses -b)",
+         [](const AttentionProblem& P, const AttentionMatrixf& O, const Eigen::VectorXf& L, const SolverConfig& c) {
+             return flash_attention_2_backward_lockfree_opencilk(P.Q, P.K, P.V, O, P.dO, L, /*causal=*/false,
+                                                                  c.block_size, c.block_size);
+         }},
+    };
+    return registry;
+}
+
+const BackwardEntry* find_backward(std::string_view name) {
+    for (const auto& entry : backward_registry()) {
+        if (name == entry.name) {
+            return &entry;
+        }
+    }
+    return nullptr;
+}
+
 const SolverEntry* find_solver(std::string_view name) {
     if (name == "rec") {
         name = "summary"; // Legacy name from rec_solver
@@ -115,9 +154,13 @@ const SolverEntry* find_solver(std::string_view name) {
 void print_usage(const char* argv0) {
     std::cerr
         << "Usage: " << argv0 << " <algorithm> (<problem.npy> | --random N) [options]\n\n"
-        << "Algorithms:\n";
+        << "Forward algorithms:\n";
     for (const auto& entry : solver_registry()) {
-        std::cerr << "  " << std::left << std::setw(11) << entry.name << entry.description << "\n";
+        std::cerr << "  " << std::left << std::setw(13) << entry.name << entry.description << "\n";
+    }
+    std::cerr << "\nBackward algorithms:\n";
+    for (const auto& entry : backward_registry()) {
+        std::cerr << "  " << std::left << std::setw(13) << entry.name << entry.description << "\n";
     }
     std::cerr
         << "\nOptions:\n"
@@ -128,7 +171,7 @@ void print_usage(const char* argv0) {
         << "  -p, --p P           Processor budget for summary (power of 4) and hybrid (default: nworkers)\n"
         << "  -r, --reps R        Timed repetitions (default 1)\n"
         << "  -w, --warmup W      Untimed warmup runs (default 0)\n"
-        << "  -o, --output PATH   Write the output matrix O of the last run to PATH (.npy)\n"
+        << "  -o, --output PATH   Write the last run's O, or stacked (3, N, 64) [dQ, dK, dV], to PATH (.npy)\n"
         << "      --json          Print a single JSON summary object after all repetitions\n"
         << "      --jsonl         Print one JSON object per repetition as it finishes\n"
 #ifdef ATTENTION_USE_PAPI
@@ -181,7 +224,9 @@ int main(int argc, char** argv) {
     }
 
     const SolverEntry* solver = find_solver(argv[1]);
-    if (solver == nullptr) {
+    const BackwardEntry* backward = find_backward(argv[1]);
+    const char* algorithm_name = solver ? solver->name : (backward ? backward->name : "");
+    if (solver == nullptr && backward == nullptr) {
         std::cerr << "Error: unknown algorithm '" << argv[1] << "'\n\n";
         print_usage(argv[0]);
         return 2;
@@ -253,7 +298,7 @@ int main(int argc, char** argv) {
     if (config.p == 0) {
         config.p = nworkers;
     }
-    if (solver->needs_power_of_4_p && !is_power_of_4(config.p)) {
+    if (solver != nullptr && solver->needs_power_of_4_p && !is_power_of_4(config.p)) {
         std::cerr << "Error: " << solver->name << " requires p to be a power of 4, got p = " << config.p
                   << (config.p == nworkers ? " (from nworkers; pass -p or set CILK_NWORKERS)" : "") << "\n";
         return 2;
@@ -261,13 +306,24 @@ int main(int argc, char** argv) {
 
     AttentionProblem problem;
     try {
-        problem = config.random_n > 0 ? generate_random_problem(config.random_n, config.seed)
+        problem = config.random_n > 0 ? generate_random_problem(config.random_n, config.seed, backward != nullptr)
                                       : AttentionProblem(config.problem_path);
     } catch (const std::exception& e) {
         std::cerr << "Error: " << e.what() << "\n";
         return 1;
     }
     const Eigen::Index N = problem.seq_len();
+    if (backward != nullptr && problem.dO.rows() != N) {
+        std::cerr << "Error: " << backward->name << " needs dO: use a (4, N, 64) problem file or --random\n";
+        return 2;
+    }
+
+    // Backward setup (untimed): one FA2 forward pass for O and the row-wise log-sum-exp L
+    AttentionMatrixf O_forward;
+    Eigen::VectorXf L_forward;
+    if (backward != nullptr) {
+        O_forward = flash_attention_2(problem.Q, problem.K, problem.V, /*causal=*/false, 64, 64, &L_forward);
+    }
 
     std::vector<std::string> events;
 #ifdef ATTENTION_USE_PAPI
@@ -281,13 +337,22 @@ int main(int argc, char** argv) {
     }
 #endif
 
-    std::cerr << "Running " << solver->name << " for N = " << N << " (d = 64), workers = " << nworkers
+    std::cerr << "Running " << algorithm_name << " for N = " << N << " (d = 64), workers = " << nworkers
               << ", block size = " << config.block_size << ", grain = " << config.grain
               << ", p = " << config.p << "\n";
 
     AttentionMatrixf O;
+    AttentionGradients grads;
+    const auto solve = [&]() {
+        if (backward != nullptr) {
+            grads = backward->run(problem, O_forward, L_forward, config);
+        } else {
+            O = solver->run(problem, config);
+        }
+    };
+
     for (int w = 0; w < config.warmup; ++w) {
-        O = solver->run(problem, config);
+        solve();
     }
 
     std::cout << std::setprecision(10);
@@ -299,7 +364,7 @@ int main(int argc, char** argv) {
         counters->start();
 #endif
         const auto t0 = std::chrono::steady_clock::now();
-        O = solver->run(problem, config);
+        solve();
         const auto t1 = std::chrono::steady_clock::now();
 #ifdef ATTENTION_USE_PAPI
         rep.counters = counters->stop();
@@ -322,7 +387,11 @@ int main(int argc, char** argv) {
 
     if (!config.output_path.empty()) {
         try {
-            save_attention_matrix_npy(config.output_path, O);
+            if (backward != nullptr) {
+                save_stacked_matrices_npy(config.output_path, {&grads.dQ, &grads.dK, &grads.dV});
+            } else {
+                save_attention_matrix_npy(config.output_path, O);
+            }
         } catch (const std::exception& e) {
             std::cerr << "Error: " << e.what() << "\n";
             return 1;
@@ -330,7 +399,7 @@ int main(int argc, char** argv) {
     }
 
     if (config.json) {
-        std::cout << "{\"name\": \"" << solver->name << "\", \"N\": " << N << ", \"d\": 64"
+        std::cout << "{\"name\": \"" << algorithm_name << "\", \"N\": " << N << ", \"d\": 64"
                   << ", \"threads\": " << nworkers << ", \"block_size\": " << config.block_size
                   << ", \"base_size\": " << config.block_size << ", \"grain\": " << config.grain
                   << ", \"p\": " << config.p

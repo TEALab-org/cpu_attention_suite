@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
-"""Correctness tests for the dense forward-pass solvers in build/attention_solver.
+"""Correctness tests for the dense attention solvers in build/attention_solver.
 
 Each test problem is generated deterministically (and cached under data/tests). For every
 problem the C++ `reference` solver is first validated against a float64 NumPy reference, and
-then every other solver configuration is checked against the C++ reference output.
+then every other forward solver configuration is checked against the C++ reference output.
+Backward solvers (*_bwd) are checked gradient by gradient (dQ, dK, dV) against a float64
+NumPy backward pass, on the same problems extended with a random upstream gradient dO.
 
 Run natively (Linux with OpenCilk installed):
     python python_scripts/run_tests.py
@@ -36,6 +38,12 @@ REL_FRO_TOL = 1e-5
 # Looser bound for the C++ reference against the float64 NumPy ground truth.
 REF_MAX_ABS_TOL = 1e-5
 REF_REL_FRO_TOL = 1e-5
+# Backward gradients vs the float64 NumPy backward. Looser: the solver's forward setup (O, L)
+# is float32, and dS = P * (dP - D) subtracts nearly equal terms. The absolute tolerance is
+# scaled by max(1, max |grad|): with Q scaled up, dK = dS^T Q grows to ~10.
+GRAD_MAX_ABS_TOL = 1e-5
+GRAD_REL_FRO_TOL = 1e-4
+GRADIENT_NAMES = ("dQ", "dK", "dV")
 
 
 @dataclass(frozen=True)
@@ -103,6 +111,33 @@ def solver_runs(workers: list[int]) -> list[SolverRun]:
     return runs
 
 
+def backward_runs(workers: list[int]) -> list[SolverRun]:
+    runs = []
+    for w in workers:
+        runs.append(SolverRun("standard_bwd", workers=w))
+        runs += [SolverRun("fa2_bwd", ("-b", str(b)), w) for b in (16, 64, 100)]
+    return runs
+
+
+def is_backward(run: SolverRun) -> bool:
+    return run.algorithm.endswith("_bwd")
+
+
+def numpy_attention_backward(qkvdo: np.ndarray) -> np.ndarray:
+    """Float64 (dQ, dK, dV) of O = softmax(Q K^T / sqrt(d)) V given upstream gradient dO."""
+    q, k, v, do = (x.astype(np.float64) for x in qkvdo)
+    scale = 1.0 / np.sqrt(q.shape[1])
+    s = (q @ k.T) * scale
+    s -= s.max(axis=1, keepdims=True)
+    p = np.exp(s)
+    p /= p.sum(axis=1, keepdims=True)
+    o = p @ v
+    dv = p.T @ do
+    dp = do @ v.T
+    ds = p * (dp - (do * o).sum(axis=1, keepdims=True))
+    return np.stack([ds @ k * scale, ds.T @ q * scale, dv])
+
+
 def numpy_attention(qkv: np.ndarray) -> np.ndarray:
     q, k, v = (x.astype(np.float64) for x in qkv)
     s = (q @ k.T) / np.sqrt(q.shape[1])
@@ -115,7 +150,9 @@ def numpy_attention(qkv: np.ndarray) -> np.ndarray:
 def error_metrics(out: np.ndarray, ref: np.ndarray) -> tuple[float, float]:
     diff = out.astype(np.float64) - ref.astype(np.float64)
     max_abs = float(np.abs(diff).max())
-    rel_fro = float(np.linalg.norm(diff) / max(np.linalg.norm(ref), 1e-30))
+    ref_norm = float(np.linalg.norm(ref))
+    # A (near-)zero reference, e.g. dQ and dK at N = 1, has no meaningful relative error
+    rel_fro = float(np.linalg.norm(diff) / ref_norm) if ref_norm > 1e-6 else 0.0
     return max_abs, rel_fro
 
 
@@ -157,14 +194,17 @@ class SolverRunner:
         return subprocess.run(cmd, cwd=REPO_ROOT, env=env, capture_output=True, text=True)
 
 
-def load_problem(problem: Problem, data_dir: Path) -> tuple[Path, np.ndarray]:
-    path = data_dir / f"problem_{problem.name}.npy"
+def load_problem(problem: Problem, data_dir: Path, with_dO: bool = False) -> tuple[Path, np.ndarray]:
+    """(3, N, d) [Q, K, V] problem, or (4, N, d) [Q, K, V, dO] for backward tests."""
+    path = data_dir / f"problem_{problem.name}{'_bwd' if with_dO else ''}.npy"
     if path.exists():
-        qkv = np.load(path)
-    else:
-        qkv = generate_problem(problem.n, D, problem.seed)
-        qkv[0] *= np.float32(problem.q_scale)
-        np.save(path, qkv)
+        return path, np.load(path)
+    qkv = generate_problem(problem.n, D, problem.seed)
+    qkv[0] *= np.float32(problem.q_scale)
+    if with_dO:
+        d_o = np.random.default_rng(problem.seed + 10_000).uniform(-1.0, 1.0, size=(1, problem.n, D))
+        qkv = np.concatenate([qkv, d_o.astype(np.float32)])
+    np.save(path, qkv)
     return path, qkv
 
 
@@ -184,11 +224,12 @@ def check(results: Results, label: str, metrics: tuple[float, float], tols: tupl
 
 def run_problem(runner: SolverRunner, problem: Problem, runs: list[SolverRun], data_dir: Path,
                 results: Results, verbose: bool) -> None:
-    problem_path, qkv = load_problem(problem, data_dir)
     out_path = data_dir / f"out_{problem.name}.npy"
     print(f"{problem.name}")
+    forward = [r for r in runs if not is_backward(r)]
+    backward = [r for r in runs if is_backward(r)]
 
-    def execute(run: SolverRun) -> np.ndarray | None:
+    def execute(run: SolverRun, problem_path: Path) -> np.ndarray | None:
         proc = runner.run(run, problem_path, out_path)
         if proc.returncode != 0:
             msg = f"exit code {proc.returncode}  {run.label}\n{proc.stderr.strip()}"
@@ -196,6 +237,27 @@ def run_problem(runner: SolverRunner, problem: Problem, runs: list[SolverRun], d
             print(f"  FAIL  {msg}")
             return None
         return np.load(out_path)
+
+    if forward:
+        run_forward(runner, problem, forward, data_dir, out_path, execute, results, verbose)
+    if backward:
+        problem_path, qkvdo = load_problem(problem, data_dir, with_dO=True)
+        grads_ref = numpy_attention_backward(qkvdo)
+        for run in backward:
+            out = execute(run, problem_path)
+            if out is None:
+                continue
+            for name, grad, ref in zip(GRADIENT_NAMES, out, grads_ref):
+                abs_tol = GRAD_MAX_ABS_TOL * max(1.0, float(np.abs(ref).max()))
+                check(results, f"{run.label} {name}", error_metrics(grad, ref),
+                      (abs_tol, GRAD_REL_FRO_TOL), verbose)
+
+    out_path.unlink(missing_ok=True)
+
+
+def run_forward(runner: SolverRunner, problem: Problem, runs: list[SolverRun], data_dir: Path, out_path: Path,
+                execute, results: Results, verbose: bool) -> None:
+    problem_path, qkv = load_problem(problem, data_dir)
 
     bad_p = SolverRun("summary", ("-p", "8"))
     if "summary" in {r.algorithm for r in runs}:
@@ -209,18 +271,16 @@ def run_problem(runner: SolverRunner, problem: Problem, runs: list[SolverRun], d
                 print(f"  ok    rejected as expected  {bad_p.label}")
 
     ref_run = SolverRun("reference")
-    o_ref = execute(ref_run)
+    o_ref = execute(ref_run, problem_path)
     if o_ref is None:
         return
     check(results, f"{ref_run.label} vs numpy float64", error_metrics(o_ref, numpy_attention(qkv)),
           (REF_MAX_ABS_TOL, REF_REL_FRO_TOL), verbose)
 
     for run in runs:
-        out = execute(run)
+        out = execute(run, problem_path)
         if out is not None:
             check(results, run.label, error_metrics(out, o_ref), (MAX_ABS_TOL, REL_FRO_TOL), verbose)
-
-    out_path.unlink(missing_ok=True)
 
 
 def main() -> int:
@@ -244,7 +304,7 @@ def main() -> int:
         return 2
 
     workers = [int(w) for w in args.workers.split(",")]
-    runs = solver_runs(workers)
+    runs = solver_runs(workers) + backward_runs(workers)
     if args.algorithm:
         runs = [r for r in runs if r.algorithm in args.algorithm]
 

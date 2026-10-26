@@ -1,5 +1,13 @@
+#pragma once
+
+#include "attention_utilities.hpp"
+#include <cilk/cilk.h>
+#include <algorithm>
+#include <cmath>
+#include <limits>
+
 // ============================================================================
-// 3. Strictly Lock-Free FlashAttention-2 Backward (For Cilkscale / Cilksan)
+// Strictly Lock-Free FlashAttention-2 Backward (For Cilkscale / Cilksan)
 // ============================================================================
 
 /**
@@ -8,6 +16,9 @@
  * Eliminates all mutexes/atomics by splitting the Q-accumulation and KV-accumulation
  * into two lock-free parallel loops. Ideal when running under OpenCilk's Cilksan
  * race detector or Cilkscale work-span profiler.
+ *
+ * L is the forward pass's row-wise log-sum-exp of the scaled scores (see flash_attention_2's
+ * L_out), so P_ij = exp(s_ij - L_i) is recomputed without a second softmax reduction.
  */
 inline AttentionGradients flash_attention_2_backward_lockfree_opencilk(
     const AttentionMatrixf& Q,

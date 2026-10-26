@@ -31,11 +31,11 @@ inline void fill_uniform(AttentionMatrixf& M, uint64_t seed, uint64_t stream_id)
 } // namespace detail
 
 /**
- * Synthetic (N, 64) Q, K, V problem with entries uniform in [-1, 1), matching the
+ * Synthetic (N, 64) Q, K, V (and optionally dO) problem with entries uniform in [-1, 1), matching the
  * distribution of python_scripts/generate_problem.py (but not its exact values).
  * Avoids storing multi-GB .npy inputs for large benchmark sizes.
  */
-inline AttentionProblem generate_random_problem(Eigen::Index N, uint64_t seed) {
+inline AttentionProblem generate_random_problem(Eigen::Index N, uint64_t seed, bool with_dO = false) {
     AttentionProblem problem;
     problem.Q.resize(N, 64);
     problem.K.resize(N, 64);
@@ -43,5 +43,9 @@ inline AttentionProblem generate_random_problem(Eigen::Index N, uint64_t seed) {
     detail::fill_uniform(problem.Q, seed, 0);
     detail::fill_uniform(problem.K, seed, 1);
     detail::fill_uniform(problem.V, seed, 2);
+    if (with_dO) {
+        problem.dO.resize(N, 64);
+        detail::fill_uniform(problem.dO, seed, 3);
+    }
     return problem;
 }

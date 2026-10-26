@@ -16,6 +16,9 @@
  *    until the full sequence of K, V blocks has been processed.
  * 3. Tiled L1/L2 memory footprint: the working buffer S (reused in place as P) is a small
  *    (Br x Bc) block that stays in CPU cache.
+ *
+ * If L_out is given it receives the row-wise log-sum-exp L_i = m_i + log(\ell_i) of the
+ * scaled scores (-inf for an empty row), which the backward pass uses to recompute P.
  */
 inline AttentionMatrixf flash_attention_2(
     const AttentionMatrixf& Q,
@@ -23,12 +26,16 @@ inline AttentionMatrixf flash_attention_2(
     const AttentionMatrixf& V,
     bool causal = false,
     Eigen::Index Br = 64, // Block size along sequence rows (queries)
-    Eigen::Index Bc = 64  // Block size along sequence cols (keys/values)
+    Eigen::Index Bc = 64, // Block size along sequence cols (keys/values)
+    Eigen::VectorXf* L_out = nullptr
 ) {
     const Eigen::Index N = Q.rows();
     const float scale = 1.0f / std::sqrt(static_cast<float>(Q.cols()));
 
     AttentionMatrixf O(N, 64);
+    if (L_out != nullptr) {
+        L_out->resize(N);
+    }
 
     const Eigen::Index num_q_blocks = (N + Br - 1) / Br;
     const Eigen::Index num_kv_blocks = (N + Bc - 1) / Bc;
@@ -124,6 +131,12 @@ inline AttentionMatrixf flash_attention_2(
                 O_acc.row(r) /= l(r);
             } else {
                 O_acc.row(r).setZero();
+            }
+        }
+        if (L_out != nullptr) {
+            for (Eigen::Index r = 0; r < br; ++r) {
+                (*L_out)(r_start + r) = (l(r) > 0.0f) ? m(r) + std::log(l(r))
+                                                     : -std::numeric_limits<float>::infinity();
             }
         }
     }

@@ -118,10 +118,11 @@ public:
     AttentionMatrixf Q;
     AttentionMatrixf K;
     AttentionMatrixf V;
+    AttentionMatrixf dO; // Upstream output gradient for backward passes; empty unless provided
 
     AttentionProblem() = default;
 
-    /// Loads a 3D stacked (3, N, 64) float32 tensor from a .npy file.
+    /// Loads a stacked (3, N, 64) [Q, K, V] or (4, N, 64) [Q, K, V, dO] float32 tensor from a .npy file.
     explicit AttentionProblem(const std::string& filepath) {
         std::ifstream in(filepath, std::ios::binary);
         if (!in) {
@@ -132,12 +133,12 @@ public:
         detail::validate_npy_metadata(header);
 
         std::vector<int64_t> shape = detail::parse_npy_shape(header);
-        if (shape.size() != 3 || shape[0] != 3 || shape[2] != 64) {
+        if (shape.size() != 3 || (shape[0] != 3 && shape[0] != 4) || shape[2] != 64) {
             std::string actual_shape = "(";
             for (size_t i = 0; i < shape.size(); ++i) {
                 actual_shape += std::to_string(shape[i]) + (i + 1 < shape.size() ? ", " : ")");
             }
-            throw std::runtime_error("Expected shape (3, N, 64), but encountered: " + actual_shape);
+            throw std::runtime_error("Expected shape (3, N, 64) or (4, N, 64), but encountered: " + actual_shape);
         }
 
         const int64_t N = shape[1];
@@ -151,6 +152,10 @@ public:
         in.read(reinterpret_cast<char*>(Q.data()), matrix_bytes);
         in.read(reinterpret_cast<char*>(K.data()), matrix_bytes);
         in.read(reinterpret_cast<char*>(V.data()), matrix_bytes);
+        if (shape[0] == 4) {
+            dO.resize(N, 64);
+            in.read(reinterpret_cast<char*>(dO.data()), matrix_bytes);
+        }
 
         if (!in) {
             throw std::runtime_error("Unexpected EOF while reading raw tensor payloads from: " + filepath);
@@ -162,9 +167,60 @@ public:
     }
 };
 
+/**
+ * Gradients of the attention output with respect to its inputs: (dQ, dK, dV).
+ */
+struct AttentionGradients {
+    AttentionMatrixf dQ;
+    AttentionMatrixf dK;
+    AttentionMatrixf dV;
+};
+
 // ============================================================================
-// Free Serialization Function
+// Free Serialization Functions
 // ============================================================================
+
+/// Saves equally sized (N, 64) matrices stacked as one (count, N, 64) float32 row-major .npy file.
+inline void save_stacked_matrices_npy(const std::string& filepath, const std::vector<const AttentionMatrixf*>& mats) {
+    if (mats.empty()) {
+        throw std::runtime_error("No matrices to save to: " + filepath);
+    }
+    std::ofstream out(filepath, std::ios::binary);
+    if (!out) {
+        throw std::runtime_error("Unable to open destination file for writing: " + filepath);
+    }
+
+    const char magic[] = "\x93NUMPY";
+    const uint8_t major = 1;
+    const uint8_t minor = 0;
+
+    std::string header_dict = "{'descr': '<f4', 'fortran_order': False, 'shape': ("
+                            + std::to_string(mats.size()) + ", "
+                            + std::to_string(mats[0]->rows()) + ", "
+                            + std::to_string(mats[0]->cols()) + "), }";
+
+    // Format alignment rule: (magic[6] + major[1] + minor[1] + header_len[2] + header) % 64 == 0
+    constexpr size_t preamble_len = 10;
+    const size_t min_header_len = header_dict.size() + 1; // +1 for trailing '\n'
+    const size_t pad_len = (64 - ((preamble_len + min_header_len) % 64)) % 64;
+
+    std::string header_padded = header_dict + std::string(pad_len, ' ') + "\n";
+    const auto header_len = static_cast<uint16_t>(header_padded.size());
+
+    out.write(magic, 6);
+    out.write(reinterpret_cast<const char*>(&major), 1);
+    out.write(reinterpret_cast<const char*>(&minor), 1);
+    out.write(reinterpret_cast<const char*>(&header_len), 2);
+    out.write(header_padded.data(), header_padded.size());
+
+    for (const AttentionMatrixf* mat : mats) {
+        out.write(reinterpret_cast<const char*>(mat->data()), mat->size() * sizeof(float));
+    }
+
+    if (!out) {
+        throw std::runtime_error("Error writing binary matrix buffer to: " + filepath);
+    }
+}
 
 /// Saves a 2D AttentionMatrixf (N, 64) to a standard float32 row-major .npy file.
 inline void save_attention_matrix_npy(const std::string& filepath, const AttentionMatrixf& mat) {

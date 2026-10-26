@@ -24,6 +24,9 @@ CILK_NWORKERS=16 build/attention_solver fa2 data/problem_65536_64.npy -b 64 -w 1
 
 Algorithms: `reference`, `standard`, `streamed`, `fa2`, `recursive`, `summary` (alias `rec`;
 requires `-p` to be a power of 4, defaulting to `CILK_NWORKERS`), `query`, `hybrid` (any `p`).
+Backward algorithms: `standard_bwd`, `fa2_bwd`. They also need the upstream gradient dO, from a
+(4, N, 64) [Q, K, V, dO] problem file or `--random`; an untimed FA2 forward pass supplies O and the
+log-sum-exp L, and `-o` writes the stacked (3, N, 64) [dQ, dK, dV].
 Run `build/attention_solver` with no arguments for the full option list.
 
 ## Testing
@@ -33,7 +36,8 @@ python python_scripts/run_tests.py --docker opencilk:v3.0   # or omit --docker o
 ```
 
 Validates the C++ `reference` solver against a float64 NumPy reference, then checks every
-solver configuration (block sizes, `p`, worker counts) against the C++ reference. Use
+solver configuration (block sizes, `p`, worker counts) against the C++ reference. Backward
+solvers are checked per gradient (dQ, dK, dV) against a float64 NumPy backward pass. Use
 `--quick` for a reduced set, `-k <algorithm>` to filter, and `-v` to print passing checks.
 
 ## Benchmarking

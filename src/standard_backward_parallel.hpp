@@ -1,5 +1,10 @@
 #pragma once
+
 #include "attention_utilities.hpp"
+#include <cilk/cilk.h>
+#include <algorithm>
+#include <cmath>
+#include <limits>
 
 // ============================================================================
 // 1. OpenCilk Standard Attention Backward Pass (O(N^2) Memory)
