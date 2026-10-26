@@ -216,7 +216,8 @@ def plot(results_dir: Path, labels: List[str], include_partial: bool, usetex: bo
                     ylabel = "Time per pair (ns)" if metric == "time" else ylabel.replace("misses", r"misses / $N^2$")
                 ax.set_ylabel(ylabel, color=TEXT, fontsize=9)
             else:
-                ax.tick_params(labelleft=False)
+                # which="both": log axes spanning under a decade label their minor ticks too
+                ax.tick_params(axis="y", which="both", labelleft=False)
             if r == n_rows - 1:
                 ax.set_xlabel(r"Sequence length $N$", color=TEXT, fontsize=9)
             else:
