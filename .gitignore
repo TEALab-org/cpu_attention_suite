@@ -6,3 +6,4 @@ results
 plots
 attn_*.out
 __pycache__
+diag_*.out

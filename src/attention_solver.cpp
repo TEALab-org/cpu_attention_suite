@@ -26,6 +26,7 @@
 #include "standard_backward_parallel.hpp"
 
 #include <cilk/cilk_api.h>
+#include <sys/resource.h>
 #ifdef ATTENTION_USE_PAPI
 #include "papi_counters.hpp"
 #endif
@@ -56,6 +57,7 @@ struct SolverConfig {
     std::string output_path;
     bool json = false;
     bool jsonl = false;
+    bool rusage = false; // Add per-repetition getrusage deltas to --jsonl output
     std::string papi_events = "PAPI_L1_DCM,PAPI_L2_DCM,PAPI_L3_TCM";
 };
 
@@ -189,6 +191,7 @@ void print_usage(const char* argv0) {
         << "  -o, --output PATH   Write the last run's O, or stacked (3, N, 64) [dQ, dK, dV], to PATH (.npy)\n"
         << "      --json          Print a single JSON summary object after all repetitions\n"
         << "      --jsonl         Print one JSON object per repetition as it finishes\n"
+        << "      --rusage        With --jsonl, add each repetition's CPU time and page faults (all threads)\n"
 #ifdef ATTENTION_USE_PAPI
         << "      --papi-events E Comma-separated PAPI events (default PAPI_L1_DCM,PAPI_L2_DCM,PAPI_L3_TCM)\n"
 #endif
@@ -220,7 +223,33 @@ bool is_power_of_4(int p) {
 struct RepResult {
     double time_ms = 0.0;
     std::vector<long long> counters; // Empty unless built with PAPI
+    // Process-wide (all threads) getrusage deltas over the repetition, with --rusage
+    double user_s = 0.0;
+    double sys_s = 0.0;
+    long minflt = 0;
+    long majflt = 0;
+    long nvcsw = 0;
+    long nivcsw = 0;
 };
+
+double seconds(const timeval& tv) {
+    return static_cast<double>(tv.tv_sec) + 1e-6 * static_cast<double>(tv.tv_usec);
+}
+
+void record_rusage_delta(RepResult& rep, const struct rusage& a, const struct rusage& b) {
+    rep.user_s = seconds(b.ru_utime) - seconds(a.ru_utime);
+    rep.sys_s = seconds(b.ru_stime) - seconds(a.ru_stime);
+    rep.minflt = b.ru_minflt - a.ru_minflt;
+    rep.majflt = b.ru_majflt - a.ru_majflt;
+    rep.nvcsw = b.ru_nvcsw - a.ru_nvcsw;
+    rep.nivcsw = b.ru_nivcsw - a.ru_nivcsw;
+}
+
+void print_rusage_json(std::ostream& out, const RepResult& rep) {
+    out << "{\"user_s\": " << rep.user_s << ", \"sys_s\": " << rep.sys_s << ", \"minflt\": " << rep.minflt
+        << ", \"majflt\": " << rep.majflt << ", \"nvcsw\": " << rep.nvcsw << ", \"nivcsw\": " << rep.nivcsw
+        << "}";
+}
 
 void print_counters_json(std::ostream& out, const std::vector<std::string>& events, const RepResult& rep) {
     out << "{";
@@ -279,6 +308,8 @@ int main(int argc, char** argv) {
             config.json = true;
         } else if (arg == "--jsonl") {
             config.jsonl = true;
+        } else if (arg == "--rusage") {
+            config.rusage = true;
 #ifdef ATTENTION_USE_PAPI
         } else if (arg == "--papi-events" && has_value) {
             config.papi_events = argv[++i];
@@ -376,12 +407,21 @@ int main(int argc, char** argv) {
     reps.reserve(config.reps);
     for (int r = 0; r < config.reps; ++r) {
         RepResult rep;
+        struct rusage usage_before {};
+        if (config.rusage) {
+            getrusage(RUSAGE_SELF, &usage_before);
+        }
 #ifdef ATTENTION_USE_PAPI
         counters->start();
 #endif
         const auto t0 = std::chrono::steady_clock::now();
         solve();
         const auto t1 = std::chrono::steady_clock::now();
+        if (config.rusage) {
+            struct rusage usage_after {};
+            getrusage(RUSAGE_SELF, &usage_after);
+            record_rusage_delta(rep, usage_before, usage_after);
+        }
 #ifdef ATTENTION_USE_PAPI
         rep.counters = counters->stop();
 #endif
@@ -393,6 +433,10 @@ int main(int argc, char** argv) {
             if (!events.empty()) {
                 std::cout << ", \"counters\": ";
                 print_counters_json(std::cout, events, rep);
+            }
+            if (config.rusage) {
+                std::cout << ", \"rusage\": ";
+                print_rusage_json(std::cout, rep);
             }
             std::cout << "}" << std::endl;
         } else if (!config.json) {
