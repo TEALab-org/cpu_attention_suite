@@ -4,7 +4,7 @@
 #   sbatch --export=ALL,RESUBMIT=1 slurm_jobs/skx.slurm   # keep resubmitting until done
 # See slurm_jobs/run_benchmark.sh for the settings that can be overridden.
 #SBATCH -J attn_skx
-#SBATCH -p skx
+#SBATCH -p skx-dev
 #SBATCH -N 1
 #SBATCH -n 1
 #SBATCH -c 48
