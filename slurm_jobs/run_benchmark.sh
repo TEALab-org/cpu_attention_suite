@@ -6,11 +6,12 @@
 # Settings (override with `sbatch --export=ALL,REPS=5,... slurm_jobs/skx.slurm`):
 #   REPO             Repository checkout (default: the directory sbatch was run from)
 #   RESULTS_DIR      Results root, outside the repo (default: $SCRATCH/cpu_attention_results)
-#   MODULES          Modules to load (default: "opencilk papi"; check names with `module spider`)
+#   MODULES          Modules to load (default: "opencilk/3.0.0 papi/7.1.0")
 #   REPS             Timed repetitions per experiment (default: 10)
 #   PAPI_REPS        Repetitions per PAPI experiment (default: 3)
 #   PHASES           Driver phases (default: build,tune,sweep,papi)
-#   MAX_N            Largest sweep size (default: 4194304 = 2^22)
+#   ALGORITHMS       Solvers to tune and sweep (default: fa2,summary,query,hybrid)
+#   MAX_N            Largest sweep size (default: 1048576 = 2^20)
 #   MAX_REP_SECONDS  Skip experiments projected to exceed this per repetition (default: unset)
 #   EXTRA_ARGS       Any further benchmark.py arguments
 #   RESUBMIT         1 = resubmit this job when it stops at its time limit (default: 0)
@@ -41,7 +42,8 @@ args=(
   --reps "${REPS:-10}"
   --papi-reps "${PAPI_REPS:-3}"
   --phases "${PHASES:-build,tune,sweep,papi}"
-  --max-n "${MAX_N:-4194304}"
+  --algorithms "${ALGORITHMS:-fa2,summary,query,hybrid}"
+  --max-n "${MAX_N:-1048576}"
   --papi
   "${time_limit_args[@]}"
 )
