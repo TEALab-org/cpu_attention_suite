@@ -8,7 +8,7 @@
 #SBATCH -N 1
 #SBATCH -n 1
 #SBATCH -c 80
-#SBATCH -t 02:00:00
+#SBATCH -t 04:00:00
 #SBATCH -o attn_icx.%j.out
 #SBATCH -e attn_icx.%j.out
 ##SBATCH -A <your-allocation>
