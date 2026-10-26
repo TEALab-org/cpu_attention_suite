@@ -5,7 +5,9 @@ Rows are grouped by architecture (one group per label), one row per algorithm; c
 the median runtime from the timing sweep and the median L1/L2/L3 misses from the PAPI sweep.
 Each cache-miss column gets a single power-of-ten scale in its header so values stay short,
 and the best (lowest) value in each architecture group is set in bold. Missing results are
-shown as "--". Requires \\usepackage{booktabs} and \\usepackage{multirow}.
+shown as "--". The table uses table* (spanning both columns of a two-column paper; pass
+--single-column for table), with the caption below the tabular.
+Requires \\usepackage{booktabs} and \\usepackage{multirow}.
 
 Example:
     python python_scripts/make_table.py \\
@@ -95,8 +97,6 @@ def build_table(results_dir: Path, labels: List[str], algorithms: List[str], n: 
     lines = [
         rf"\begin{{{env}}}[t]",
         r"  \centering",
-        rf"  \caption{{{caption or default_caption(n, bold_best, any_partial, pass_name)}}}",
-        rf"  \label{{{label}}}",
         r"  \small",
         r"  \begin{tabular}{ll" + "r" * len(COLUMNS) + "}",
         r"    \toprule",
@@ -132,7 +132,14 @@ def build_table(results_dir: Path, labels: List[str], algorithms: List[str], n: 
             lines.append("    " + " & ".join(cells) + r" \\")
         if g + 1 < len(labels):
             lines.append(r"    \midrule")
-    lines += [r"    \bottomrule", r"  \end{tabular}", rf"\end{{{env}}}", ""]
+    lines += [
+        r"    \bottomrule",
+        r"  \end{tabular}",
+        rf"  \caption{{{caption or default_caption(n, bold_best, any_partial, pass_name)}}}",
+        rf"  \label{{{label}}}",
+        rf"\end{{{env}}}",
+        "",
+    ]
     return "\n".join(lines), warnings
 
 
@@ -167,8 +174,8 @@ def main() -> int:
     parser.add_argument("--latex-label", default=None, help=r"\label key (default: tab:dense-<pass>-N<n>)")
     parser.add_argument("--include-partial", action="store_true",
                         help="Use unfinished experiments too, marked with a dagger")
-    parser.add_argument("--wide", action="store_true",
-                        help="Use table* to span both columns of a two-column layout")
+    parser.add_argument("--single-column", action="store_true",
+                        help="Use table instead of the default table* (which spans both columns)")
     parser.add_argument("--no-bold", action="store_true", help="Do not bold the best value per architecture")
     args = parser.parse_args()
 
@@ -177,7 +184,7 @@ def main() -> int:
     table, warnings = build_table(args.results_dir, labels, algorithms, args.n, args.include_partial,
                                   not args.no_bold, args.caption,
                                   args.latex_label or f"tab:dense-{args.pass_name}-N{args.n}",
-                                  args.wide, args.pass_name)
+                                  not args.single_column, args.pass_name)
     for warning in warnings:
         print(f"Note: {warning}", file=sys.stderr)
 

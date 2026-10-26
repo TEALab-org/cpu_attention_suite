@@ -56,6 +56,12 @@ ROWS = [
     ("papi", "PAPI_L3_TCM", "L3 cache misses"),
 ]
 
+# Default series per pass; None draws every algorithm that has results
+DEFAULT_ALGORITHMS = {
+    "forward": ["fa2", "summary", "query", "hybrid"],
+    "backward": None,
+}
+
 TEXT = "#1f1f1e"
 MUTED = "#6b6a63"
 GRID = "#e4e3dd"
@@ -118,7 +124,8 @@ def style_axis(ax) -> None:
 
 
 def plot(results_dir: Path, labels: List[str], include_partial: bool, usetex: bool, normalize: bool,
-         pass_name: str):
+         pass_name: str, algorithms: Optional[List[str]] = None):
+    """algorithms: solver names to draw (e.g. fa2, summary_bwd); None draws every algorithm with data."""
     if usetex:
         plt.rcParams.update({"text.usetex": True, "font.family": "serif",
                              "font.serif": ["Computer Modern Serif"]})
@@ -154,6 +161,8 @@ def plot(results_dir: Path, labels: List[str], include_partial: bool, usetex: bo
             plotted = False
             for slot, (base, _) in enumerate(ALGORITHMS):
                 algorithm = algorithm_key(base, pass_name)
+                if algorithms is not None and algorithm not in algorithms:
+                    continue  # Skipped series keep their slot, so colours stay fixed
                 series = collect(data[(label, kind)], algorithm, metric, normalize)
                 if series is None:
                     continue
@@ -229,6 +238,9 @@ def main() -> int:
     parser.add_argument("--output-dir", type=Path, required=True, help="Directory to write figures into")
     parser.add_argument("--labels", default="skx,icx,spr",
                         help="Comma-separated machine labels, one column each (default: %(default)s)")
+    parser.add_argument("--algorithms", default=None,
+                        help="Comma-separated solvers to draw (default: forward fa2,summary,query,hybrid; "
+                             "backward all with data)")
     parser.add_argument("--pass", dest="pass_name", choices=PASSES, default="forward",
                         help="Plot forward or backward (*_bwd) results (default: %(default)s)")
     parser.add_argument("--name", default=None, help="Output file stem (default: dense_<pass>)")
@@ -245,7 +257,12 @@ def main() -> int:
     if missing:
         print(f"Warning: no results for {', '.join(missing)} under {args.results_dir}", file=sys.stderr)
 
-    fig = plot(args.results_dir, labels, args.include_partial, args.usetex, args.normalize, args.pass_name)
+    if args.algorithms:
+        algorithms = [a for a in args.algorithms.split(",") if a]
+    else:
+        algorithms = DEFAULT_ALGORITHMS[args.pass_name]
+    fig = plot(args.results_dir, labels, args.include_partial, args.usetex, args.normalize, args.pass_name,
+               algorithms)
     name = (args.name or f"dense_{args.pass_name}") + ("_normalized" if args.normalize else "")
     args.output_dir.mkdir(parents=True, exist_ok=True)
     for fmt in args.formats.split(","):
