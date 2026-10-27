@@ -1,6 +1,7 @@
 #pragma once
 
 #include "attention_utilities.hpp"
+#include <cilk/holder.h>
 #include <algorithm>
 #include <cmath>
 #include <limits>
@@ -64,8 +65,28 @@ struct LeafWorkspace {
     Eigen::VectorXf m_hat;
     Eigen::VectorXf l_hat;
 
-    explicit LeafWorkspace(Eigen::Index b) : S(b, b), u_hat(b, 64), m_hat(b), l_hat(b) {}
+    LeafWorkspace() = default;
+    explicit LeafWorkspace(Eigen::Index b) { reserve(b); }
+
+    /// Grows the buffers to fit b x b leaves (no-op once large enough)
+    void reserve(Eigen::Index b) {
+        if (S.rows() < b) {
+            S.resize(b, b);
+            u_hat.resize(b, 64);
+            m_hat.resize(b);
+            l_hat.resize(b);
+        }
+    }
 };
+
+/**
+ * One LeafWorkspace per worker for recursions with many serial tasks (QueryParallel, Hybrid).
+ * A Cilk holder gives each stolen strand its own view, so workspaces are allocated per steal
+ * rather than per task; allocating one per task freed ~1 TiB per solve at N = 2^19, and glibc
+ * returning that memory to the kernel made the first solve several times slower.
+ * A serial task takes its view right before accumulating, with no spawn or sync in between.
+ */
+using LeafWorkspaces = cilk::holder<LeafWorkspace>;
 
 /**
  * Associative softmax reduction operator \bigoplus:

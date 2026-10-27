@@ -27,7 +27,8 @@ inline void hybrid_forward_summary(
     AttentionSummary& sigma,
     Eigen::Index b,
     Eigen::Index grain,
-    float scale
+    float scale,
+    LeafWorkspaces& workspaces
 ) {
     if (I.len <= 0 || J.len <= 0) {
         return;
@@ -43,7 +44,7 @@ inline void hybrid_forward_summary(
             sigma.U_row(i).setZero();
         }
 
-        query_parallel_accumulate(Q, K, V, I, J, sigma, b, grain, scale);
+        query_parallel_accumulate(Q, K, V, I, J, sigma, b, grain, scale, workspaces);
         return;
     }
 
@@ -64,10 +65,10 @@ inline void hybrid_forward_summary(
 
     const int child_p = p / 4;
 
-    cilk_spawn hybrid_forward_summary(Q, K, V, I1, J1, child_p, sigma_11, b, grain, scale);
-    cilk_spawn hybrid_forward_summary(Q, K, V, I1, J2, child_p, sigma_12, b, grain, scale);
-    cilk_spawn hybrid_forward_summary(Q, K, V, I2, J1, child_p, sigma_21, b, grain, scale);
-               hybrid_forward_summary(Q, K, V, I2, J2, child_p, sigma_22, b, grain, scale);
+    cilk_spawn hybrid_forward_summary(Q, K, V, I1, J1, child_p, sigma_11, b, grain, scale, workspaces);
+    cilk_spawn hybrid_forward_summary(Q, K, V, I1, J2, child_p, sigma_12, b, grain, scale, workspaces);
+    cilk_spawn hybrid_forward_summary(Q, K, V, I2, J1, child_p, sigma_21, b, grain, scale, workspaces);
+               hybrid_forward_summary(Q, K, V, I2, J2, child_p, sigma_22, b, grain, scale, workspaces);
     cilk_sync;
 
     parallel_forward_merge(I, J, sigma, sigma_11, sigma_12, sigma_21, sigma_22);
@@ -97,7 +98,8 @@ inline AttentionMatrixf hybrid_attention(
     const IndexRange full_range{0, N};
 
     AttentionSummary sigma(full_range);
-    detail::hybrid_forward_summary(Q, K, V, full_range, full_range, p, sigma, b, grain, scale);
+    detail::LeafWorkspaces workspaces;
+    detail::hybrid_forward_summary(Q, K, V, full_range, full_range, p, sigma, b, grain, scale, workspaces);
 
     AttentionMatrixf O(N, 64);
     cilk_for (Eigen::Index i = 0; i < N; ++i) {

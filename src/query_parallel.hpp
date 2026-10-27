@@ -23,15 +23,17 @@ inline void query_parallel_accumulate(
     AttentionSummary& sigma,
     Eigen::Index b,
     Eigen::Index grain,
-    float scale
+    float scale,
+    LeafWorkspaces& workspaces
 ) {
     if (I.len <= 0 || J.len <= 0) {
         return;
     }
 
-    // Base Case: |I| <= grain, serial cache-oblivious traversal with a task-local workspace
+    // Base Case: |I| <= grain, serial cache-oblivious traversal with this worker's workspace
     if (I.len <= grain) {
-        LeafWorkspace ws(b);
+        LeafWorkspace& ws = workspaces;
+        ws.reserve(b);
         dense_accumulate(Q, K, V, I, J, sigma, b, scale, ws);
         return;
     }
@@ -45,12 +47,12 @@ inline void query_parallel_accumulate(
     const IndexRange J1{J.start, j_mid};
     const IndexRange J2{J.start + j_mid, J.len - j_mid};
 
-    cilk_spawn query_parallel_accumulate(Q, K, V, I1, J1, sigma, b, grain, scale);
-               query_parallel_accumulate(Q, K, V, I2, J1, sigma, b, grain, scale);
+    cilk_spawn query_parallel_accumulate(Q, K, V, I1, J1, sigma, b, grain, scale, workspaces);
+               query_parallel_accumulate(Q, K, V, I2, J1, sigma, b, grain, scale, workspaces);
     cilk_sync;
 
-    cilk_spawn query_parallel_accumulate(Q, K, V, I1, J2, sigma, b, grain, scale);
-               query_parallel_accumulate(Q, K, V, I2, J2, sigma, b, grain, scale);
+    cilk_spawn query_parallel_accumulate(Q, K, V, I1, J2, sigma, b, grain, scale, workspaces);
+               query_parallel_accumulate(Q, K, V, I2, J2, sigma, b, grain, scale, workspaces);
     cilk_sync;
 }
 
@@ -85,7 +87,8 @@ inline AttentionMatrixf query_parallel_attention(
         sigma.U.row(i).setZero();
     }
 
-    detail::query_parallel_accumulate(Q, K, V, full_range, full_range, sigma, b, grain, scale);
+    detail::LeafWorkspaces workspaces;
+    detail::query_parallel_accumulate(Q, K, V, full_range, full_range, sigma, b, grain, scale, workspaces);
 
     AttentionMatrixf O(N, 64);
     cilk_for (Eigen::Index i = 0; i < N; ++i) {

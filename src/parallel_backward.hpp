@@ -63,7 +63,7 @@ inline void parallel_backward_summary(
  * therefore always write disjoint rows of the shared \Gamma.
  *
  * Once the owned interval (I in mode Q, J in mode KV) is at most grain, the rest of the (I, J)
- * block runs as a serial BackwardAccumulate with one task-local workspace, as in QueryParallel.
+ * block runs as a serial BackwardAccumulate with this worker's workspace, as in QueryParallel.
  */
 inline void owned_backward(
     const BackwardInputs& in,
@@ -72,7 +72,8 @@ inline void owned_backward(
     GradientMode mode,
     GradientSummary& gamma,
     Eigen::Index b,
-    Eigen::Index grain
+    Eigen::Index grain,
+    BackwardLeafWorkspaces& workspaces
 ) {
     if (I.len <= 0 || J.len <= 0) {
         return;
@@ -80,7 +81,8 @@ inline void owned_backward(
 
     const Eigen::Index owned_len = (mode == GradientMode::Q) ? I.len : J.len;
     if (owned_len <= grain || (I.len <= b && J.len <= b)) {
-        BackwardLeafWorkspace ws(b);
+        BackwardLeafWorkspace& ws = workspaces; // This worker's view; no spawn or sync follows
+        ws.reserve(b);
         backward_accumulate(in, I, J, gamma, mode, b, ws);
         return;
     }
@@ -94,18 +96,18 @@ inline void owned_backward(
     const IndexRange J2{J.start + j_mid, J.len - j_mid};
 
     if (mode == GradientMode::Q) {
-        cilk_spawn owned_backward(in, I1, J1, mode, gamma, b, grain);
-                   owned_backward(in, I2, J1, mode, gamma, b, grain);
+        cilk_spawn owned_backward(in, I1, J1, mode, gamma, b, grain, workspaces);
+                   owned_backward(in, I2, J1, mode, gamma, b, grain, workspaces);
         cilk_sync;
-        cilk_spawn owned_backward(in, I1, J2, mode, gamma, b, grain);
-                   owned_backward(in, I2, J2, mode, gamma, b, grain);
+        cilk_spawn owned_backward(in, I1, J2, mode, gamma, b, grain, workspaces);
+                   owned_backward(in, I2, J2, mode, gamma, b, grain, workspaces);
         cilk_sync;
     } else {
-        cilk_spawn owned_backward(in, I1, J1, mode, gamma, b, grain);
-                   owned_backward(in, I1, J2, mode, gamma, b, grain);
+        cilk_spawn owned_backward(in, I1, J1, mode, gamma, b, grain, workspaces);
+                   owned_backward(in, I1, J2, mode, gamma, b, grain, workspaces);
         cilk_sync;
-        cilk_spawn owned_backward(in, I2, J1, mode, gamma, b, grain);
-                   owned_backward(in, I2, J2, mode, gamma, b, grain);
+        cilk_spawn owned_backward(in, I2, J1, mode, gamma, b, grain, workspaces);
+                   owned_backward(in, I2, J2, mode, gamma, b, grain, workspaces);
         cilk_sync;
     }
 }
@@ -122,13 +124,14 @@ inline void hybrid_backward_summary(
     int p,
     GradientSummary& gamma,
     Eigen::Index b,
-    Eigen::Index grain
+    Eigen::Index grain,
+    BackwardLeafWorkspaces& workspaces
 ) {
     // Switch: p no longer splits evenly 4 ways (or subproblem has already reached leaf granularity)
     if (p % 4 != 0 || (I.len <= b && J.len <= b)) {
         reset_gradients(gamma, I, J);
-        owned_backward(in, I, J, GradientMode::Q, gamma, b, grain);
-        owned_backward(in, I, J, GradientMode::KV, gamma, b, grain);
+        owned_backward(in, I, J, GradientMode::Q, gamma, b, grain, workspaces);
+        owned_backward(in, I, J, GradientMode::KV, gamma, b, grain, workspaces);
         return;
     }
 
@@ -147,10 +150,10 @@ inline void hybrid_backward_summary(
 
     const int child_p = p / 4;
 
-    cilk_spawn hybrid_backward_summary(in, I1, J1, child_p, gamma_11, b, grain);
-    cilk_spawn hybrid_backward_summary(in, I1, J2, child_p, gamma_12, b, grain);
-    cilk_spawn hybrid_backward_summary(in, I2, J1, child_p, gamma_21, b, grain);
-               hybrid_backward_summary(in, I2, J2, child_p, gamma_22, b, grain);
+    cilk_spawn hybrid_backward_summary(in, I1, J1, child_p, gamma_11, b, grain, workspaces);
+    cilk_spawn hybrid_backward_summary(in, I1, J2, child_p, gamma_12, b, grain, workspaces);
+    cilk_spawn hybrid_backward_summary(in, I2, J1, child_p, gamma_21, b, grain, workspaces);
+               hybrid_backward_summary(in, I2, J2, child_p, gamma_22, b, grain, workspaces);
     cilk_sync;
 
     parallel_gradient_merge(I, J, gamma, gamma_11, gamma_12, gamma_21, gamma_22);
@@ -207,8 +210,9 @@ inline AttentionGradients parallel_owned_backward(
 
     GradientSummary gamma(full_range, full_range);
     detail::reset_gradients(gamma, full_range, full_range);
-    detail::owned_backward(in, full_range, full_range, GradientMode::Q, gamma, b, grain);
-    detail::owned_backward(in, full_range, full_range, GradientMode::KV, gamma, b, grain);
+    detail::BackwardLeafWorkspaces workspaces;
+    detail::owned_backward(in, full_range, full_range, GradientMode::Q, gamma, b, grain, workspaces);
+    detail::owned_backward(in, full_range, full_range, GradientMode::KV, gamma, b, grain, workspaces);
     return detail::take_gradients(gamma);
 }
 
@@ -235,6 +239,7 @@ inline AttentionGradients hybrid_backward(
     const IndexRange full_range{0, N};
 
     GradientSummary gamma(full_range, full_range);
-    detail::hybrid_backward_summary(in, full_range, full_range, p, gamma, b, grain);
+    detail::BackwardLeafWorkspaces workspaces;
+    detail::hybrid_backward_summary(in, full_range, full_range, p, gamma, b, grain, workspaces);
     return detail::take_gradients(gamma);
 }

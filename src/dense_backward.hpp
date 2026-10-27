@@ -3,6 +3,7 @@
 #include "attention_utilities.hpp"
 #include "dense_accumulate.hpp" // IndexRange
 #include <cilk/cilk.h>
+#include <cilk/holder.h>
 #include <cmath>
 #include <limits>
 #include <utility>
@@ -62,8 +63,20 @@ struct BackwardLeafWorkspace {
     RowMajorScratch S;  // Scores, then probabilities P in place
     RowMajorScratch dP; // dO V^T, then score gradients dS in place
 
-    explicit BackwardLeafWorkspace(Eigen::Index b) : S(b, b), dP(b, b) {}
+    BackwardLeafWorkspace() = default;
+    explicit BackwardLeafWorkspace(Eigen::Index b) { reserve(b); }
+
+    /// Grows the buffers to fit b x b leaves (no-op once large enough)
+    void reserve(Eigen::Index b) {
+        if (S.rows() < b) {
+            S.resize(b, b);
+            dP.resize(b, b);
+        }
+    }
 };
+
+/// One BackwardLeafWorkspace per worker for the owned traversals (see LeafWorkspaces)
+using BackwardLeafWorkspaces = cilk::holder<BackwardLeafWorkspace>;
 
 /**
  * Blocked leaf: BackwardPair(i, j, \Gamma) for all (i, j) \in I x J at once, as dense products
