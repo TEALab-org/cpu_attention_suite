@@ -3,6 +3,7 @@
 #   sbatch slurm_jobs/icx.slurm
 #   sbatch --export=ALL,RESUBMIT=1 slurm_jobs/icx.slurm   # keep resubmitting until done
 #   sbatch --export=ALL,PASS=backward,RESUBMIT=1 slurm_jobs/icx.slurm   # backward pass
+#   sbatch --export=ALL,SPARSITY=1,RESUBMIT=1 slurm_jobs/icx.slurm   # sparsity experiment (add PASS=backward)
 # See slurm_jobs/run_benchmark.sh for the settings that can be overridden.
 #SBATCH -J attn_icx
 #SBATCH -p icx

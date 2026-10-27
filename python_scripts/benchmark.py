@@ -10,6 +10,12 @@ Runs on one machine (one architecture) per invocation, in these phases:
          also recording the peak resident memory each algorithm adds above its inputs.
   papi   With --papi: build a PAPI-enabled solver and repeat the sweep collecting hardware
          cache-miss counters instead of (well, as well as) timings.
+  sparsity  Not in the default phases. At one fixed N (--sparsity-n), time the pass's sparse solver
+         (sparse_fwd or sparse_bwd, tuned like the others) varying one kind of sparsity at a time
+         over --sparsity-levels: a block-random or banded mask, zero Q rows, jointly zero K/V rows
+         and (backward) zero dO rows. Level 0 (nothing sparse) is run once and shared by every kind.
+         Results go to sparsity/ (sparsity_backward/); the dense baselines come from the sweep at
+         the same N.
 
 --pass selects the forward solvers (default) or the backward (*_bwd) solvers. Backward results
 go to tune_backward/, sweep_backward/ and papi_backward/, so the two passes never mix.
@@ -58,6 +64,17 @@ DEFAULT_ALGORITHMS = {
     "forward": ["fa2", "summary", "query", "hybrid", "streamed", "standard"],
     "backward": ["fa2_lockfree_bwd", "fa2_locking_bwd", "summary_bwd", "owned_bwd", "hybrid_bwd", "standard_bwd"],
 }
+
+# Sparse solver per pass, and the kinds of sparsity its phase varies (one at a time)
+SPARSE_ALGORITHM = {"forward": "sparse_fwd", "backward": "sparse_bwd"}
+SPARSITY_TYPES = {
+    "forward": ["block", "band", "zero_q", "zero_kv"],
+    "backward": ["block", "band", "zero_q", "zero_kv", "zero_do"],
+}
+# element (an element-random mask) is a stress test, not a default: its quadtree stores a bitmap at
+# almost every leaf, about N^2/8 bytes at moderate density
+SPARSITY_KINDS = ["block", "band", "element", "zero_q", "zero_kv", "zero_do"]
+DEFAULT_SPARSITY_LEVELS = "0,0.25,0.5,0.75,0.9,0.95,0.99"
 
 # Statuses that are final for an experiment (complete or deliberately not run)
 FINAL_STATUSES = {"complete", "skipped"}
@@ -164,6 +181,8 @@ ALGORITHM_PARAMS = {
     "summary_bwd": ["b", "p"],
     "owned_bwd": ["b", "g"],
     "hybrid_bwd": ["b", "g", "p"],
+    "sparse_fwd": ["b", "g"],
+    "sparse_bwd": ["b", "g"],
 }
 PARAM_FLAGS = {"b": "-b", "g": "-g", "p": "-p"}
 
@@ -184,7 +203,7 @@ def tuning_grid(algorithm: str, threads: int) -> List[Dict[str, int]]:
         return [{"b": b} for b in blocks + [512]]
     if algorithm in ("summary", "summary_bwd"):
         return [{"b": b, "p": p} for b, p in itertools.product(blocks, powers_of_4_near(threads))]
-    if algorithm in ("query", "owned_bwd"):
+    if algorithm in ("query", "owned_bwd", "sparse_fwd", "sparse_bwd"):
         return [{"b": b, "g": g} for b, g in itertools.product(blocks[:4], grains) if g >= b]
     if algorithm in ("hybrid", "hybrid_bwd"):
         return [{"b": b, "g": g, "p": threads} for b, g in itertools.product(blocks[:4], grains) if g >= b]
@@ -209,6 +228,17 @@ def is_backward(algorithm: str) -> bool:
     return algorithm.endswith("_bwd")
 
 
+def sparsity_solver_args(kind: str, level: float, mask_tile: int, zero_run: int) -> List[str]:
+    """Solver flags for one kind of sparsity at a level (the fraction of the work removed)."""
+    if level == 0:
+        return []
+    if kind in ("block", "band", "element"):
+        args = ["--mask", kind, "--mask-density", f"{1 - level:g}"]
+        return args + ["--mask-tile", str(mask_tile)] if kind == "block" else args
+    flag = {"zero_q": "--zero-q", "zero_kv": "--zero-kv", "zero_do": "--zero-do"}[kind]
+    return [flag, f"{level:g}", "--zero-run", str(zero_run)]
+
+
 def result_dir_name(kind: str, pass_name: str) -> str:
     """tune/sweep/papi for the forward pass (unchanged layout), tune_backward/... for backward."""
     return kind if pass_name == "forward" else f"{kind}_{pass_name}"
@@ -230,6 +260,8 @@ def estimated_bytes(algorithm: str, n: int, params: Dict[str, int], threads: int
         return base + n * n * BYTES_F32
     if algorithm == "streamed":
         return base + threads * n * BYTES_F32
+    if algorithm == "sparse_fwd":
+        return base + n * D * BYTES_F32  # The dense summary U
     if algorithm in ("summary", "hybrid", "query"):
         levels = summary_levels(algorithm, params.get("p", 1))
         return base + (2 ** levels) * n * D * BYTES_F32
@@ -245,10 +277,15 @@ class Experiment:
     reps: int
     warmup: int
     seed: int
+    # Sparsity experiments only: {"type": kind or "none", "level": fraction, "args": solver flags}
+    sparsity: Optional[dict] = None
 
     def file_name(self) -> str:
         parts = [self.algorithm, f"N{self.n}"]
         parts += [f"{k}{self.params[k]}" for k in ALGORITHM_PARAMS[self.algorithm] if k in self.params]
+        if self.sparsity is not None:
+            sp = self.sparsity
+            parts.append("none" if sp["type"] == "none" else f"{sp['type']}{sp['level']:g}")
         return "_".join(parts) + ".json"
 
     def solver_args(self) -> List[str]:
@@ -256,6 +293,8 @@ class Experiment:
         for key in ALGORITHM_PARAMS[self.algorithm]:
             if key in self.params:
                 args += [PARAM_FLAGS[key], str(self.params[key])]
+        if self.sparsity is not None:
+            args += self.sparsity["args"]
         return args
 
 
@@ -335,6 +374,9 @@ class Runner:
             record["grain"] = exp.params["g"]
         if "p" in exp.params:
             record["p"] = exp.params["p"]
+        if exp.sparsity is not None:
+            record["sparsity_type"] = exp.sparsity["type"]
+            record["sparsity_level"] = exp.sparsity["level"]
         return record
 
     def run(self, exp: Experiment, out_dir: Path, solver: Path, extra_args: List[str] = ()) -> Optional[dict]:
@@ -397,6 +439,8 @@ class Runner:
                     # Peak memory of this experiment's first solve; a resumed run keeps the original
                     if "memory" in rep and "memory" not in record:
                         record["memory"] = rep["memory"]
+                    if "sparsity" in rep:  # Achieved mask density and zero-row counts
+                        record["sparsity"] = rep["sparsity"]
                     atomic_write_json(path, record)
                     print(f"        rep {len(record['times'])}/{exp.reps}: {rep['time_ms'] / 1000:.3f} s", flush=True)
             finally:
@@ -440,6 +484,8 @@ class Runner:
     def projected_rep_seconds(self, exp: Experiment, out_dir: Path) -> Optional[float]:
         """Extrapolates the time per repetition from the largest smaller N already measured."""
         best = None
+        if exp.sparsity is not None:
+            return None  # One fixed N: nothing smaller to extrapolate from
         for path in out_dir.glob(f"{exp.algorithm}_N*.json"):
             rec = load_json(path)
             if not rec or rec.get("params") != exp.params or not rec.get("times") or rec["N"] >= exp.n:
@@ -521,6 +567,26 @@ def sweep_phase(runner: Runner, solver: Path, kind: str, best: Dict[str, Dict[st
             runner.run(exp, out_dir, solver, extra_args)
 
 
+def sparsity_phase(runner: Runner, solver: Path, params: Dict[str, int]) -> None:
+    args = runner.args
+    algorithm = SPARSE_ALGORITHM[args.pass_name]
+    out_dir = runner.machine_dir / result_dir_name("sparsity", args.pass_name)
+    n = args.sparsity_n
+    print(f"\n== sparsity ({args.pass_name}) at N = {n}: {', '.join(args.sparsity_types)} "
+          f"at levels {', '.join(f'{x:g}' for x in args.sparsity_levels)}")
+    experiments = []
+    if 0 in args.sparsity_levels:
+        experiments.append({"type": "none", "level": 0.0, "args": []})
+    for kind in args.sparsity_types:
+        for level in args.sparsity_levels:
+            if level > 0:
+                experiments.append({"type": kind, "level": level,
+                                    "args": sparsity_solver_args(kind, level, args.mask_tile, args.zero_run)})
+    for sparsity in experiments:
+        exp = Experiment("sparsity", algorithm, n, params, args.reps, warmup_for(args, n), args.seed, sparsity)
+        runner.run(exp, out_dir, solver, ["--memory"])
+
+
 def write_run_info(machine_dir: Path, args: argparse.Namespace, threads: int, commit: Optional[str]) -> None:
     info = {
         "started": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
@@ -596,6 +662,19 @@ def main() -> int:
     parser.add_argument("--time-limit", type=float, default=None,
                         help="Stop cleanly after this many seconds (set a bit below the job's wall time)")
     parser.add_argument("--retry-failed", action="store_true", help="Rerun experiments that failed or timed out")
+    parser.add_argument("--sparsity-n", type=int, default=2**18,
+                        help="Problem size for the sparsity phase (default: %(default)s)")
+    parser.add_argument("--sparsity-types", default=None,
+                        help="Comma-separated kinds of sparsity, each varied alone: "
+                             f"{', '.join(SPARSITY_KINDS)} (default: forward "
+                             f"{','.join(SPARSITY_TYPES['forward'])}; backward {','.join(SPARSITY_TYPES['backward'])})")
+    parser.add_argument("--sparsity-levels", default=DEFAULT_SPARSITY_LEVELS,
+                        help="Comma-separated sparsity levels, the fraction of pairs masked out or of rows "
+                             "zeroed (default: %(default)s)")
+    parser.add_argument("--mask-tile", type=int, default=256,
+                        help="Tile size of the block-random mask (default: %(default)s)")
+    parser.add_argument("--zero-run", type=int, default=256,
+                        help="Zero rows come in aligned runs of this many rows (default: %(default)s)")
     args = parser.parse_args()
 
     args.label = args.label or default_label()
@@ -603,6 +682,16 @@ def main() -> int:
     phases = set(args.phases.split(","))
     algorithms = ([a for a in args.algorithms.split(",") if a] if args.algorithms
                   else DEFAULT_ALGORITHMS[args.pass_name])
+    args.sparsity_types = (args.sparsity_types.split(",") if args.sparsity_types
+                           else SPARSITY_TYPES[args.pass_name])
+    bad_kinds = [k for k in args.sparsity_types if k not in SPARSITY_KINDS]
+    if bad_kinds:
+        parser.error(f"unknown sparsity types: {', '.join(bad_kinds)}")
+    if "zero_do" in args.sparsity_types and args.pass_name != "backward":
+        parser.error("zero_do sparsity needs --pass backward")
+    args.sparsity_levels = sorted({float(x) for x in args.sparsity_levels.split(",")})
+    if any(not 0 <= x < 1 for x in args.sparsity_levels):
+        parser.error("sparsity levels must be in [0, 1)")
     unknown = [a for a in algorithms if a not in ALGORITHM_PARAMS]
     if unknown:
         parser.error(f"unknown algorithms: {', '.join(unknown)}")
@@ -665,6 +754,18 @@ def main() -> int:
                     exit_code = EXIT_ERROR
                 else:
                     sweep_phase(runner, papi_solver, "papi", best, algorithms, args.papi_reps, extra)
+
+        if "sparsity" in phases:
+            sparse = SPARSE_ALGORITHM[args.pass_name]
+            tuned = load_json(machine_dir / result_dir_name("tune", args.pass_name) / "best.json") or {}
+            if sparse not in tuned and "tune" in phases:
+                # Tuned with nothing sparse, like the dense solvers it is compared against
+                tuned = tune_phase(runner, solver, [sparse])
+            if sparse in tuned:
+                sparsity_phase(runner, solver, tuned[sparse])
+            else:
+                print(f"Skipping sparsity phase: {sparse} is not tuned (add tune to --phases)", file=sys.stderr)
+                exit_code = EXIT_ERROR
     except Interrupted:
         print("\nStopped before finishing (time limit or signal); rerun the same command to resume.")
         exit_code = EXIT_INCOMPLETE

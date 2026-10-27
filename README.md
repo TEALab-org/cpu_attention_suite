@@ -98,6 +98,24 @@ recording L1/L2/L3 misses (`--papi-events`), summed over all worker threads, for
 This needs a Linux machine with hardware counters available to user processes
 (`kernel.perf_event_paranoid` <= 2); it does not work inside docker on macOS.
 
+### Sparsity
+
+`--phases sparsity` (not in the defaults) times the pass's sparse solver (`sparse_fwd`, or
+`sparse_bwd` with `--pass backward`) at one N (`--sparsity-n`, default 2^18), varying one kind of
+sparsity at a time over `--sparsity-levels` (default 0, 0.25, 0.5, 0.75, 0.9, 0.95, 0.99): a
+block-random mask (`--mask-tile`, default 256), a banded mask, zero Q rows, jointly zero K/V rows
+and, for backward, zero dO rows (`--sparsity-types`; `element` adds the element-random stress
+test). The level is the fraction of query-key pairs masked out or of rows zeroed; level 0 runs
+once and is shared by every kind. The sparse solver is tuned at `--tune-n` with nothing sparse,
+like the dense solvers. Results go to `sparsity/` (`sparsity_backward/`), and each record keeps
+the achieved mask density and zero-row counts. The dense baselines are the dense sweep at the
+same N, so run the dense benchmarks on the same machine label.
+
+```bash
+python3 python_scripts/benchmark.py --results-dir /path/outside/repo --label mymachine \
+  --algorithms sparse_fwd --phases build,tune,sparsity
+```
+
 ### TACC Stampede3
 
 `slurm_jobs/{skx,icx,spr}.slurm` run everything (including PAPI) on one node of each type with a
@@ -107,6 +125,8 @@ This needs a Linux machine with hardware counters available to user processes
 ```bash
 sbatch --export=ALL,RESUBMIT=1 slurm_jobs/skx.slurm
 sbatch --export=ALL,PASS=backward,RESUBMIT=1 slurm_jobs/skx.slurm
+sbatch --export=ALL,SPARSITY=1,RESUBMIT=1 slurm_jobs/skx.slurm
+sbatch --export=ALL,SPARSITY=1,PASS=backward,RESUBMIT=1 slurm_jobs/skx.slurm
 ```
 
 Results go to `$SCRATCH/cpu_attention_results/<label>`. Settings such as `REPS`, `MAX_N`,
@@ -117,10 +137,14 @@ Results go to `$SCRATCH/cpu_attention_results/<label>`. Settings such as `REPS`,
 ```bash
 python python_scripts/plot_results.py --results-dir <results-dir> --output-dir <out> [--normalize] [--pass backward]
 python python_scripts/make_table.py --results-dir <results-dir> --output-dir <out> [--n 1048576] [--pass backward]
+python python_scripts/plot_sparsity.py --results-dir <results-dir> --output-dir <out> [--pass backward] [--baseline self]
 ```
 
 `plot_results.py` draws runtime and L1/L2/L3 misses over N with one column per architecture;
 `--normalize` divides by N^2. `make_table.py` writes a LaTeX (booktabs, multirow) table at one N.
+`plot_sparsity.py` draws one panel per architecture with one series per kind of sparsity: speedup
+over the fastest dense solver at the same N (or, with `--baseline self`, over the sparse solver with
+nothing sparse) against the achieved work reduction, with the ideal speedup as a dashed diagonal.
 
 ## Licenses
 

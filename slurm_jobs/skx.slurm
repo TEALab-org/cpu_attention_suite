@@ -3,6 +3,7 @@
 #   sbatch slurm_jobs/skx.slurm
 #   sbatch --export=ALL,RESUBMIT=1 slurm_jobs/skx.slurm   # keep resubmitting until done
 #   sbatch --export=ALL,PASS=backward,RESUBMIT=1 slurm_jobs/skx.slurm   # backward pass
+#   sbatch --export=ALL,SPARSITY=1,RESUBMIT=1 slurm_jobs/skx.slurm   # sparsity experiment (add PASS=backward)
 # See slurm_jobs/run_benchmark.sh for the settings that can be overridden.
 #SBATCH -J attn_skx
 #SBATCH -p skx-dev

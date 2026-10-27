@@ -581,6 +581,17 @@ int main(int argc, char** argv) {
         O_forward = flash_attention_2(problem.Q, problem.K, problem.V, /*causal=*/false, 64, 64, &L_forward);
     }
 
+    // Achieved sparsity, reported with the timings since mask density and zero-row fractions
+    // are rounded to tiles and runs (and the generators always allow the diagonal)
+    const auto print_sparsity_json = [&](std::ostream& out) {
+        const double pairs = static_cast<double>(N) * static_cast<double>(N);
+        out << "{\"mask_nnz\": " << (uses_mask ? mask.nnz() : static_cast<int64_t>(N) * N)
+            << ", \"mask_density\": " << (uses_mask ? static_cast<double>(mask.nnz()) / pairs : 1.0)
+            << ", \"mask_nodes\": " << (uses_mask ? mask.nodes.size() : 0)
+            << ", \"zero_q_rows\": " << zero_q_rows << ", \"zero_kv_rows\": " << zero_kv_rows
+            << ", \"zero_do_rows\": " << zero_do_rows << "}";
+    };
+
     std::vector<std::string> events;
 #ifdef ATTENTION_USE_PAPI
     std::unique_ptr<ThreadCounters> counters;
@@ -670,6 +681,10 @@ int main(int argc, char** argv) {
                 std::cout << ", \"memory\": ";
                 memory.print_json(std::cout);
             }
+            if (uses_mask && r == 0) {
+                std::cout << ", \"sparsity\": ";
+                print_sparsity_json(std::cout);
+            }
             std::cout << "}" << std::endl;
         } else if (!config.json) {
             std::cout << rep.time_ms << " ms" << std::endl;
@@ -711,6 +726,10 @@ int main(int argc, char** argv) {
         if (config.memory) {
             std::cout << ", \"memory\": ";
             memory.print_json(std::cout);
+        }
+        if (uses_mask) {
+            std::cout << ", \"sparsity\": ";
+            print_sparsity_json(std::cout);
         }
         std::cout << "}\n";
     }

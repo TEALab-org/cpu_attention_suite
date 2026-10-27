@@ -11,6 +11,12 @@
 #   PAPI_REPS        Repetitions per PAPI experiment (default: 3)
 #   PHASES           Driver phases (default: build,tune,sweep,papi)
 #   PASS             forward or backward (default: forward); backward results go to *_backward/
+#   SPARSITY         1 = run the sparsity experiment instead of the dense benchmarks: tunes the pass's
+#                    sparse solver (sparse_fwd or sparse_bwd) and varies one kind of sparsity at a time
+#                    at a fixed N (PHASES then defaults to build,tune,sparsity)
+#   SPARSITY_N       Problem size for the sparsity experiment (default: 262144 = 2^18)
+#   SPARSITY_TYPES   Kinds of sparsity (default: block,band,zero_q,zero_kv, plus zero_do for backward)
+#   SPARSITY_LEVELS  Sparsity levels (default: 0,0.25,0.5,0.75,0.9,0.95,0.99)
 #   ALGORITHMS       Solvers to tune and sweep (default: fa2,summary,query,hybrid for forward,
 #                    fa2_lockfree_bwd,fa2_locking_bwd,summary_bwd,owned_bwd,hybrid_bwd,standard_bwd for backward)
 #   MAX_N            Largest sweep size (default: 1048576 = 2^20)
@@ -39,7 +45,11 @@ if [[ -n "${SLURM_JOB_ID:-}" ]]; then
 fi
 
 PASS="${PASS:-forward}"
-if [[ "$PASS" == "backward" ]]; then
+if [[ "${SPARSITY:-0}" == "1" ]]; then
+  # The sparse solver is the only one tuned here; its dense baselines come from the dense jobs
+  if [[ "$PASS" == "backward" ]]; then ALGORITHMS="${ALGORITHMS:-sparse_bwd}"; else ALGORITHMS="${ALGORITHMS:-sparse_fwd}"; fi
+  PHASES="${PHASES:-build,tune,sparsity}"
+elif [[ "$PASS" == "backward" ]]; then
   ALGORITHMS="${ALGORITHMS:-fa2_lockfree_bwd,fa2_locking_bwd,summary_bwd,owned_bwd,hybrid_bwd,standard_bwd}"
 else
   ALGORITHMS="${ALGORITHMS:-fa2,summary,query,hybrid}"
@@ -58,6 +68,9 @@ args=(
   "${time_limit_args[@]}"
 )
 [[ -n "${MAX_REP_SECONDS:-}" ]] && args+=(--max-rep-seconds "$MAX_REP_SECONDS")
+[[ -n "${SPARSITY_N:-}" ]] && args+=(--sparsity-n "$SPARSITY_N")
+[[ -n "${SPARSITY_TYPES:-}" ]] && args+=(--sparsity-types "$SPARSITY_TYPES")
+[[ -n "${SPARSITY_LEVELS:-}" ]] && args+=(--sparsity-levels "$SPARSITY_LEVELS")
 # shellcheck disable=SC2206
 [[ -n "${EXTRA_ARGS:-}" ]] && args+=($EXTRA_ARGS)
 
