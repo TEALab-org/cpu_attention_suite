@@ -34,7 +34,9 @@ Run `build/attention_solver` with no arguments for the full option list.
 ### Sparse attention
 
 `sparse_fwd` is the query-owned mixed sparse forward (Algorithm 19 of the exposition). It combines
-a structural mask with exactly zero query rows and jointly zero key/value rows. The mask is built
+a structural mask with exactly zero query rows and jointly zero key/value rows. `sparse_bwd` is the
+matching backward with query and key/value ownership (Algorithms 32-34), which also skips zero
+upstream-gradient rows; its untimed setup runs `sparse_fwd` on the same inputs for O and L. The mask is built
 as a quadtree during setup (untimed) from a pattern or a dense file:
 
 ```bash

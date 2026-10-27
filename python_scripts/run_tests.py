@@ -134,9 +134,10 @@ def backward_runs(workers: list[int]) -> list[SolverRun]:
     return runs
 
 
-def sparse_forward_runs(workers: list[int]) -> list[SolverRun]:
+def sparse_runs(workers: list[int]) -> list[SolverRun]:
     return [
-        SolverRun("sparse_fwd", ("-b", str(b), "-g", str(g)), w)
+        SolverRun(algorithm, ("-b", str(b), "-g", str(g)), w)
+        for algorithm in ("sparse_fwd", "sparse_bwd")
         for w in workers for b, g in itertools.product((16, 64), (16, 256))
     ]
 
@@ -145,20 +146,26 @@ def is_sparse(run: SolverRun) -> bool:
     return run.algorithm.startswith("sparse_")
 
 
-# Sparse cases: (label, mask kind, fraction of zero query rows, fraction of jointly zero K/V rows)
+# Sparse cases: (label, mask kind, fractions of zero query, jointly zero K/V, and zero dO rows).
+# Forward runs the cases without zero dO rows; backward runs them all.
 SPARSE_CASES = [
-    ("full", "full", 0.0, 0.0),
-    ("block", "block", 0.0, 0.0),
-    ("band", "band", 0.0, 0.0),
-    ("element", "element", 0.0, 0.0),
-    ("diagonal", "diagonal", 0.0, 0.0),
-    ("zeroQ", "full", 0.5, 0.0),
-    ("zeroKV", "full", 0.0, 0.5),
-    ("allZeroQ", "full", 1.0, 0.0),
-    ("allZeroKV", "full", 0.0, 1.0),
-    ("block+zeros", "block", 0.4, 0.4),
-    ("element+zeros", "element", 0.4, 0.4),
-    ("band+zeros", "band", 0.5, 0.25),
+    ("full", "full", 0.0, 0.0, 0.0),
+    ("block", "block", 0.0, 0.0, 0.0),
+    ("band", "band", 0.0, 0.0, 0.0),
+    ("element", "element", 0.0, 0.0, 0.0),
+    ("diagonal", "diagonal", 0.0, 0.0, 0.0),
+    ("zeroQ", "full", 0.5, 0.0, 0.0),
+    ("zeroKV", "full", 0.0, 0.5, 0.0),
+    ("allZeroQ", "full", 1.0, 0.0, 0.0),
+    ("allZeroKV", "full", 0.0, 1.0, 0.0),
+    ("block+zeros", "block", 0.4, 0.4, 0.0),
+    ("element+zeros", "element", 0.4, 0.4, 0.0),
+    ("band+zeros", "band", 0.5, 0.25, 0.0),
+    ("zeroDO", "full", 0.0, 0.0, 0.5),
+    ("allZeroDO", "full", 0.0, 0.0, 1.0),
+    ("block+zeroDO", "block", 0.0, 0.0, 0.4),
+    ("element+allKinds", "element", 0.3, 0.3, 0.3),
+    ("band+allKinds", "band", 0.4, 0.25, 0.4),
 ]
 
 
@@ -202,15 +209,32 @@ def numpy_masked_attention(qkv: np.ndarray, mask: np.ndarray) -> np.ndarray:
     return p @ v
 
 
-def load_sparse_case(problem: Problem, case: tuple, data_dir: Path) -> tuple[Path, Path, np.ndarray, np.ndarray]:
-    """Problem file with the case's zero rows and its dense mask file (cached)."""
-    label, kind, zero_q, zero_kv = case
-    stem = f"sparse_{problem.name}_{label.replace('+', '_')}"
+def numpy_masked_attention_backward(qkvdo: np.ndarray, mask: np.ndarray) -> np.ndarray:
+    """Float64 (dQ, dK, dV) of masked attention given the upstream gradient dO."""
+    q, k, v, do = (x.astype(np.float64) for x in qkvdo)
+    scale = 1.0 / np.sqrt(q.shape[1])
+    s = np.where(mask.astype(bool), (q @ k.T) * scale, -np.inf)
+    s -= s.max(axis=1, keepdims=True)
+    p = np.exp(s)
+    p /= p.sum(axis=1, keepdims=True)
+    o = p @ v
+    dp = do @ v.T
+    ds = p * (dp - (do * o).sum(axis=1, keepdims=True))
+    return np.stack([ds @ k * scale, ds.T @ q * scale, p.T @ do])
+
+
+def load_sparse_case(problem: Problem, case: tuple, data_dir: Path,
+                     backward: bool = False) -> tuple[Path, Path, np.ndarray, np.ndarray]:
+    """Problem file with the case's zero rows (and dO for backward) and its dense mask file (cached)."""
+    label, kind, zero_q, zero_kv, zero_do = case
+    stem = f"sparse_{problem.name}_{label.replace('+', '_')}{'_bwd' if backward else ''}"
     problem_path, mask_path = data_dir / f"{stem}.npy", data_dir / f"{stem}_mask.npy"
     if problem_path.exists() and mask_path.exists():
         return problem_path, mask_path, np.load(problem_path), np.load(mask_path)
-    _, qkv = load_problem(problem, data_dir)
+    _, qkv = load_problem(problem, data_dir, with_dO=backward)
     qkv = qkv.copy()
+    if backward:
+        qkv[3, zero_row_runs(problem.n, zero_do, problem.seed + 4)] = 0.0
     qkv[0, zero_row_runs(problem.n, zero_q, problem.seed + 1)] = 0.0
     kv_rows = zero_row_runs(problem.n, zero_kv, problem.seed + 2)
     qkv[1, kv_rows] = 0.0
@@ -221,22 +245,37 @@ def load_sparse_case(problem: Problem, case: tuple, data_dir: Path) -> tuple[Pat
     return problem_path, mask_path, qkv, mask
 
 
-def run_sparse_forward(runner: "SolverRunner", problem: Problem, runs: list[SolverRun], data_dir: Path,
-                       out_path: Path, results: "Results", verbose: bool) -> None:
+def run_sparse(runner: "SolverRunner", problem: Problem, runs: list[SolverRun], data_dir: Path,
+               out_path: Path, results: "Results", verbose: bool) -> None:
+    forward = [r for r in runs if not is_backward(r)]
+    backward = [r for r in runs if is_backward(r)]
     for case in SPARSE_CASES:
-        problem_path, mask_path, qkv, mask = load_sparse_case(problem, case, data_dir)
-        ref = numpy_masked_attention(qkv, mask)
-        for run in runs:
-            masked = SolverRun(run.algorithm, (*run.args, "--mask-file", str(mask_path.relative_to(REPO_ROOT))),
-                               run.workers)
-            proc = runner.run(masked, problem_path, out_path)
-            label = f"{run.label} [{case[0]}]"
-            if proc.returncode != 0:
-                results.failures.append(f"exit code {proc.returncode}  {label}\n{proc.stderr.strip()}")
-                print(f"  FAIL  exit code {proc.returncode}  {label}\n{proc.stderr.strip()}")
-                continue
-            check(results, label, error_metrics(np.load(out_path), ref), (REF_MAX_ABS_TOL, REF_REL_FRO_TOL),
-                  verbose)
+        if forward and case[4] == 0.0:
+            run_sparse_case(runner, problem, case, forward, data_dir, out_path, results, verbose, backward=False)
+        if backward:
+            run_sparse_case(runner, problem, case, backward, data_dir, out_path, results, verbose, backward=True)
+
+
+def run_sparse_case(runner: "SolverRunner", problem: Problem, case: tuple, runs: list[SolverRun], data_dir: Path,
+                    out_path: Path, results: "Results", verbose: bool, backward: bool) -> None:
+    problem_path, mask_path, data, mask = load_sparse_case(problem, case, data_dir, backward)
+    ref = numpy_masked_attention_backward(data, mask) if backward else numpy_masked_attention(data, mask)
+    for run in runs:
+        masked = SolverRun(run.algorithm, (*run.args, "--mask-file", str(mask_path.relative_to(REPO_ROOT))),
+                           run.workers)
+        proc = runner.run(masked, problem_path, out_path)
+        label = f"{run.label} [{case[0]}]"
+        if proc.returncode != 0:
+            results.failures.append(f"exit code {proc.returncode}  {label}\n{proc.stderr.strip()}")
+            print(f"  FAIL  exit code {proc.returncode}  {label}\n{proc.stderr.strip()}")
+            continue
+        out = np.load(out_path)
+        if not backward:
+            check(results, label, error_metrics(out, ref), (REF_MAX_ABS_TOL, REF_REL_FRO_TOL), verbose)
+            continue
+        for name, grad, grad_ref in zip(GRADIENT_NAMES, out, ref):
+            abs_tol = GRAD_MAX_ABS_TOL * max(1.0, float(np.abs(grad_ref).max()))
+            check(results, f"{label} {name}", error_metrics(grad, grad_ref), (abs_tol, GRAD_REL_FRO_TOL), verbose)
 
 
 def check_mask_generators(runner: "SolverRunner", data_dir: Path, results: "Results", verbose: bool) -> None:
@@ -463,7 +502,7 @@ def run_problem(runner: SolverRunner, problem: Problem, runs: list[SolverRun], d
     print(f"{problem.name}")
     forward = [r for r in runs if not is_backward(r) and not is_sparse(r)]
     backward = [r for r in runs if is_backward(r) and not is_sparse(r)]
-    sparse_forward = [r for r in runs if is_sparse(r) and not is_backward(r)]
+    sparse = [r for r in runs if is_sparse(r)]
 
     def execute(run: SolverRun, problem_path: Path) -> np.ndarray | None:
         proc = runner.run(run, problem_path, out_path)
@@ -476,8 +515,8 @@ def run_problem(runner: SolverRunner, problem: Problem, runs: list[SolverRun], d
 
     if forward:
         run_forward(runner, problem, forward, data_dir, out_path, execute, results, verbose)
-    if sparse_forward:
-        run_sparse_forward(runner, problem, sparse_forward, data_dir, out_path, results, verbose)
+    if sparse:
+        run_sparse(runner, problem, sparse, data_dir, out_path, results, verbose)
     if backward:
         problem_path, qkvdo = load_problem(problem, data_dir, with_dO=True)
         grads_ref = numpy_attention_backward(qkvdo)
@@ -536,7 +575,7 @@ def main() -> int:
         return 2
 
     workers = [int(w) for w in args.workers.split(",")]
-    runs = solver_runs(workers) + backward_runs(workers) + sparse_forward_runs(workers)
+    runs = solver_runs(workers) + backward_runs(workers) + sparse_runs(workers)
     if args.algorithm:
         runs = [r for r in runs if r.algorithm in args.algorithm]
 

@@ -20,6 +20,7 @@
 #include "parallel_summary.hpp"
 #include "problem_generator.hpp"
 #include "query_parallel.hpp"
+#include "sparse_backward.hpp"
 #include "sparse_forward.hpp"
 #include "standard_attention_parallel.hpp"
 #include "standard_attention_reference.hpp"
@@ -140,6 +141,7 @@ struct BackwardEntry {
     const char* description;
     BackwardFn run;
     bool needs_power_of_4_p = false;
+    bool sparse = false; // Uses the mask quadtree; O and L come from the masked forward
 };
 
 const std::vector<BackwardEntry>& backward_registry() {
@@ -171,6 +173,12 @@ const std::vector<BackwardEntry>& backward_registry() {
          [](const AttentionProblem& P, const AttentionMatrixf& O, const Eigen::VectorXf& L, const SolverConfig& c) {
              return hybrid_backward(P.Q, P.K, P.V, O, P.dO, L, c.p, c.block_size, c.grain);
          }},
+        {"sparse_bwd", "Owned mixed sparse backward, Algorithms 32-34 (uses -b, -g, mask and zero rows)",
+         [](const AttentionProblem& P, const AttentionMatrixf& O, const Eigen::VectorXf& L, const SolverConfig& c) {
+             return owned_mixed_backward_attention(P.Q, P.K, P.V, O, P.dO, L, *c.mask, c.shortcuts, c.block_size,
+                                                   c.grain);
+         },
+         /*needs_power_of_4_p=*/false, /*sparse=*/true},
     };
     return registry;
 }
@@ -521,7 +529,7 @@ int main(int argc, char** argv) {
         return 2;
     }
 
-    const bool uses_mask = solver != nullptr && solver->sparse;
+    const bool uses_mask = (solver != nullptr && solver->sparse) || (backward != nullptr && backward->sparse);
     if (!uses_mask && (config.mask_pattern != "none" || !config.mask_file.empty())) {
         std::cerr << "Error: --mask and --mask-file apply only to sparse_* solvers\n";
         return 2;
@@ -560,10 +568,16 @@ int main(int argc, char** argv) {
                   << " (runs of " << config.zero_run << ")\n";
     }
 
-    // Backward setup (untimed): one FA2 forward pass for O and the row-wise log-sum-exp L
+    // Backward setup (untimed): one forward pass for O and the row-wise log-sum-exp L. Sparse
+    // backward needs the masked forward with the same mask and zero rows; dense backward uses FA2.
     AttentionMatrixf O_forward;
     Eigen::VectorXf L_forward;
-    if (backward != nullptr) {
+    if (backward != nullptr && backward->sparse) {
+        SparseForwardResult forward = owned_mixed_forward_attention(problem.Q, problem.K, problem.V, mask,
+                                                                    config.shortcuts, config.block_size, config.grain);
+        O_forward = std::move(forward.O);
+        L_forward = std::move(forward.L);
+    } else if (backward != nullptr) {
         O_forward = flash_attention_2(problem.Q, problem.K, problem.V, /*causal=*/false, 64, 64, &L_forward);
     }
 
