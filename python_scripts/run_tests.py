@@ -17,6 +17,7 @@ Run with the solver inside the OpenCilk docker image (one container is reused fo
 from __future__ import annotations
 
 import argparse
+import json
 import itertools
 import os
 import subprocess
@@ -192,6 +193,16 @@ class SolverRunner:
             subprocess.run(["docker", "kill", self.container], capture_output=True)
             self.container = None
 
+    def run_args(self, args: list[str], workers: int) -> subprocess.CompletedProcess:
+        """Runs the solver with explicit arguments (no problem file or output)."""
+        cmd = [self.solver, *args]
+        if self.container:
+            cmd = ["docker", "exec", "-e", f"CILK_NWORKERS={workers}", self.container, *cmd]
+            env = None
+        else:
+            env = {**os.environ, "CILK_NWORKERS": str(workers)}
+        return subprocess.run(cmd, cwd=REPO_ROOT, env=env, capture_output=True, text=True)
+
     def run(self, run: SolverRun, problem_path: Path, output_path: Path) -> subprocess.CompletedProcess:
         # Paths are passed relative to the repo root so they resolve both natively and in /work.
         cmd = [
@@ -247,6 +258,44 @@ def expect_rejected(runner: SolverRunner, run: SolverRun, problem_path: Path, ou
         results.passed += 1
         if verbose:
             print(f"  ok    rejected as expected  {run.label}")
+
+
+def check_memory(runner: SolverRunner, results: Results, verbose: bool) -> None:
+    """--memory must isolate each algorithm's own footprint from its inputs: the standard
+    solvers' N x N matrices must show up in full, while FA2's tiles stay far below them."""
+    n = 2048
+    matrix = n * n * 4
+    print(f"memory (N = {n}, N x N float32 = {matrix / 2**20:.0f} MiB)")
+    cases = [
+        ("standard", 1, True),            # S
+        ("fa2", 1, False),
+        ("standard_bwd", 2, True),        # P and dS
+        ("fa2_locking_bwd", 1, False),
+    ]
+    for algorithm, matrices, expect_quadratic in cases:
+        proc = runner.run_args([algorithm, "--random", str(n), "-w", "0", "-r", "1", "--jsonl", "--memory"], 4)
+        label = f"{algorithm} --memory"
+        if proc.returncode != 0 or not proc.stdout.strip():
+            results.failures.append(f"exit code {proc.returncode}  {label}\n{proc.stderr.strip()}")
+            print(f"  FAIL  exit code {proc.returncode}  {label}")
+            continue
+        mem = json.loads(proc.stdout.splitlines()[0]).get("memory", {})
+        delta = mem.get("peak_delta_bytes", -1)
+        if expect_quadratic:
+            ok = delta >= 0.9 * matrices * matrix
+            expectation = f">= 0.9 x {matrices} x N^2 floats"
+        else:
+            ok = 0 <= delta < 0.25 * matrix
+            expectation = "< 0.25 x N^2 floats"
+        ok = ok and mem.get("peak_reset", False)
+        line = f"peak_delta={delta / 2**20:.1f} MiB ({expectation})  {label}"
+        if ok:
+            results.passed += 1
+            if verbose:
+                print(f"  ok    {line}")
+        else:
+            results.failures.append(line)
+            print(f"  FAIL  {line}")
 
 
 def run_problem(runner: SolverRunner, problem: Problem, runs: list[SolverRun], data_dir: Path,
@@ -334,6 +383,8 @@ def main() -> int:
     try:
         for problem in QUICK_PROBLEMS if args.quick else FULL_PROBLEMS:
             run_problem(runner, problem, runs, data_dir, results, args.verbose)
+        if not args.algorithm:
+            check_memory(runner, results, args.verbose)
     finally:
         runner.close()
 

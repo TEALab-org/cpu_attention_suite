@@ -37,7 +37,9 @@
 #include <functional>
 #include <iomanip>
 #include <iostream>
+#include <limits>
 #include <memory>
+#include <fstream>
 #include <sstream>
 #include <string>
 #include <string_view>
@@ -58,6 +60,7 @@ struct SolverConfig {
     bool json = false;
     bool jsonl = false;
     bool rusage = false; // Add per-repetition getrusage deltas to --jsonl output
+    bool memory = false; // Report the first solve's peak resident memory
     std::string papi_events = "PAPI_L1_DCM,PAPI_L2_DCM,PAPI_L3_TCM";
 };
 
@@ -197,6 +200,7 @@ void print_usage(const char* argv0) {
         << "      --json          Print a single JSON summary object after all repetitions\n"
         << "      --jsonl         Print one JSON object per repetition as it finishes\n"
         << "      --rusage        With --jsonl, add each repetition's CPU time and page faults (all threads)\n"
+        << "      --memory        Report the first solve's peak resident memory above the inputs (Linux)\n"
 #ifdef ATTENTION_USE_PAPI
         << "      --papi-events E Comma-separated PAPI events (default PAPI_L1_DCM,PAPI_L2_DCM,PAPI_L3_TCM)\n"
 #endif
@@ -249,6 +253,60 @@ void record_rusage_delta(RepResult& rep, const struct rusage& a, const struct ru
     rep.nvcsw = b.ru_nvcsw - a.ru_nvcsw;
     rep.nivcsw = b.ru_nivcsw - a.ru_nivcsw;
 }
+
+/// Resident memory from /proc/self/status: current (VmRSS) and peak since start or last reset (VmHWM)
+struct MemorySample {
+    long long rss_bytes = -1;
+    long long peak_bytes = -1;
+};
+
+MemorySample read_memory() {
+    MemorySample sample;
+    std::ifstream status("/proc/self/status");
+    std::string key;
+    long long kb = 0;
+    std::string unit;
+    while (status >> key) {
+        if (key == "VmRSS:" && status >> kb >> unit) {
+            sample.rss_bytes = kb * 1024;
+        } else if (key == "VmHWM:" && status >> kb >> unit) {
+            sample.peak_bytes = kb * 1024;
+        } else {
+            status.ignore(std::numeric_limits<std::streamsize>::max(), '\n');
+        }
+    }
+    return sample;
+}
+
+/// Resets VmHWM to the current RSS (writing 5 to clear_refs, Linux >= 4.0); false if unsupported
+bool reset_peak_memory() {
+    std::ofstream clear_refs("/proc/self/clear_refs");
+    if (!clear_refs) {
+        return false;
+    }
+    clear_refs << "5";
+    clear_refs.flush();
+    return static_cast<bool>(clear_refs);
+}
+
+/**
+ * Peak memory of the first solve in this process. Later solves can reuse heap memory glibc kept
+ * from the first, so only the first shows the algorithm's own footprint. The baseline is taken
+ * after the inputs (and backward setup) exist, so peak_delta_bytes is what the algorithm adds.
+ */
+struct MemoryReport {
+    MemorySample baseline;
+    MemorySample after;
+    bool peak_reset = false;
+    const char* first_solve = "";
+
+    void print_json(std::ostream& out) const {
+        out << "{\"baseline_rss_bytes\": " << baseline.rss_bytes << ", \"peak_rss_bytes\": " << after.peak_bytes
+            << ", \"peak_delta_bytes\": " << (after.peak_bytes - baseline.rss_bytes)
+            << ", \"peak_reset\": " << (peak_reset ? "true" : "false") << ", \"first_solve\": \"" << first_solve
+            << "\"}";
+    }
+};
 
 void print_rusage_json(std::ostream& out, const RepResult& rep) {
     out << "{\"user_s\": " << rep.user_s << ", \"sys_s\": " << rep.sys_s << ", \"minflt\": " << rep.minflt
@@ -315,6 +373,8 @@ int main(int argc, char** argv) {
             config.jsonl = true;
         } else if (arg == "--rusage") {
             config.rusage = true;
+        } else if (arg == "--memory") {
+            config.memory = true;
 #ifdef ATTENTION_USE_PAPI
         } else if (arg == "--papi-events" && has_value) {
             config.papi_events = argv[++i];
@@ -403,8 +463,27 @@ int main(int argc, char** argv) {
         }
     };
 
+    // With --memory, measure the first solve (a warmup if there is one, otherwise rep 0)
+    MemoryReport memory;
+    bool memory_measured = false;
+    const auto measured_solve = [&](const char* which) {
+        if (config.memory && !memory_measured) {
+            memory.baseline = read_memory();
+            memory.peak_reset = reset_peak_memory();
+            if (!memory.peak_reset) {
+                std::cerr << "Warning: could not reset peak memory; --memory reports the process-wide peak\n";
+            }
+            solve();
+            memory.after = read_memory();
+            memory.first_solve = which;
+            memory_measured = true;
+        } else {
+            solve();
+        }
+    };
+
     for (int w = 0; w < config.warmup; ++w) {
-        solve();
+        measured_solve("warmup");
     }
 
     std::cout << std::setprecision(10);
@@ -420,7 +499,7 @@ int main(int argc, char** argv) {
         counters->start();
 #endif
         const auto t0 = std::chrono::steady_clock::now();
-        solve();
+        measured_solve("rep 0");
         const auto t1 = std::chrono::steady_clock::now();
         if (config.rusage) {
             struct rusage usage_after {};
@@ -442,6 +521,10 @@ int main(int argc, char** argv) {
             if (config.rusage) {
                 std::cout << ", \"rusage\": ";
                 print_rusage_json(std::cout, rep);
+            }
+            if (config.memory && r == 0) {
+                std::cout << ", \"memory\": ";
+                memory.print_json(std::cout);
             }
             std::cout << "}" << std::endl;
         } else if (!config.json) {
@@ -480,6 +563,10 @@ int main(int argc, char** argv) {
                 print_counters_json(std::cout, events, reps[i]);
             }
             std::cout << "]";
+        }
+        if (config.memory) {
+            std::cout << ", \"memory\": ";
+            memory.print_json(std::cout);
         }
         std::cout << "}\n";
     }

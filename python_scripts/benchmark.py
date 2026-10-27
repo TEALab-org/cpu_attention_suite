@@ -6,7 +6,8 @@ Runs on one machine (one architecture) per invocation, in these phases:
   build  Compile build/attention_solver for this machine into the results directory.
   tune   At a demo size (--tune-n), sweep each tunable solver's parameters and pick the
          configuration with the lowest median time (written to tune/best.json).
-  sweep  Time each solver with its tuned parameters over the sequence lengths (--min-n..--max-n).
+  sweep  Time each solver with its tuned parameters over the sequence lengths (--min-n..--max-n),
+         also recording the peak resident memory each algorithm adds above its inputs.
   papi   With --papi: build a PAPI-enabled solver and repeat the sweep collecting hardware
          cache-miss counters instead of (well, as well as) timings.
 
@@ -393,6 +394,9 @@ class Runner:
                     record["times"].append(rep["time_ms"])
                     if "counters" in rep:
                         record.setdefault("counters", []).append(rep["counters"])
+                    # Peak memory of this experiment's first solve; a resumed run keeps the original
+                    if "memory" in rep and "memory" not in record:
+                        record["memory"] = rep["memory"]
                     atomic_write_json(path, record)
                     print(f"        rep {len(record['times'])}/{exp.reps}: {rep['time_ms'] / 1000:.3f} s", flush=True)
             finally:
@@ -640,7 +644,8 @@ def main() -> int:
                 best[a] = {}  # Untunable solvers need no tuning results
 
         if "sweep" in phases:
-            sweep_phase(runner, solver, "sweep", best, algorithms, args.reps)
+            # Timing runs also record each experiment's peak memory (cheap: two /proc reads)
+            sweep_phase(runner, solver, "sweep", best, algorithms, args.reps, ["--memory"])
 
         if args.papi and "papi" in phases:
             if "build" in phases and not build_solver(papi_solver, args.march, papi=True):
