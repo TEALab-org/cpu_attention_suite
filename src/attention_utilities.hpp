@@ -167,6 +167,55 @@ public:
     }
 };
 
+/// Loads a square (n, n) 0/1 mask stored as uint8 or bool from a .npy file (row-major)
+inline std::vector<uint8_t> load_mask_npy(const std::string& filepath, int64_t& n) {
+    std::ifstream in(filepath, std::ios::binary);
+    if (!in) {
+        throw std::runtime_error("Unable to open mask file: " + filepath);
+    }
+    const std::string header = detail::read_npy_header(in);
+    if (header.find("|u1") == std::string::npos && header.find("|b1") == std::string::npos) {
+        throw std::runtime_error("Mask " + filepath + " must be uint8 or bool");
+    }
+    if (header.find("'fortran_order': True") != std::string::npos) {
+        throw std::runtime_error("Fortran-ordered mask files are not supported");
+    }
+    const std::vector<int64_t> shape = detail::parse_npy_shape(header);
+    if (shape.size() != 2 || shape[0] != shape[1]) {
+        throw std::runtime_error("Mask " + filepath + " must have shape (n, n)");
+    }
+    n = shape[0];
+    std::vector<uint8_t> mask(static_cast<size_t>(n * n));
+    in.read(reinterpret_cast<char*>(mask.data()), static_cast<std::streamsize>(mask.size()));
+    if (!in) {
+        throw std::runtime_error("Unexpected EOF while reading mask: " + filepath);
+    }
+    return mask;
+}
+
+/// Saves a square (n, n) 0/1 mask as a uint8 .npy file (the inverse of load_mask_npy)
+inline void save_mask_npy(const std::string& filepath, const std::vector<uint8_t>& mask, int64_t n) {
+    std::ofstream out(filepath, std::ios::binary);
+    if (!out) {
+        throw std::runtime_error("Unable to open destination file for writing: " + filepath);
+    }
+    std::string header = "{'descr': '|u1', 'fortran_order': False, 'shape': (" + std::to_string(n) + ", " +
+                         std::to_string(n) + "), }";
+    const size_t pad = (64 - ((10 + header.size() + 1) % 64)) % 64;
+    header += std::string(pad, ' ') + "\n";
+    const char magic[] = "\x93NUMPY";
+    const uint8_t version[2] = {1, 0};
+    const auto header_len = static_cast<uint16_t>(header.size());
+    out.write(magic, 6);
+    out.write(reinterpret_cast<const char*>(version), 2);
+    out.write(reinterpret_cast<const char*>(&header_len), 2);
+    out.write(header.data(), static_cast<std::streamsize>(header.size()));
+    out.write(reinterpret_cast<const char*>(mask.data()), static_cast<std::streamsize>(mask.size()));
+    if (!out) {
+        throw std::runtime_error("Error writing mask to: " + filepath);
+    }
+}
+
 /**
  * Gradients of the attention output with respect to its inputs: (dQ, dK, dV).
  */

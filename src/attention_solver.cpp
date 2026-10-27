@@ -20,6 +20,7 @@
 #include "parallel_summary.hpp"
 #include "problem_generator.hpp"
 #include "query_parallel.hpp"
+#include "sparse_forward.hpp"
 #include "standard_attention_parallel.hpp"
 #include "standard_attention_reference.hpp"
 #include "standard_attention_streamed.hpp"
@@ -62,6 +63,19 @@ struct SolverConfig {
     bool rusage = false; // Add per-repetition getrusage deltas to --jsonl output
     bool memory = false; // Report the first solve's peak resident memory
     std::string papi_events = "PAPI_L1_DCM,PAPI_L2_DCM,PAPI_L3_TCM";
+
+    // Sparsity (Section 3.3): mask pattern for sparse_* solvers, and exactly zero rows
+    std::string mask_pattern = "none";
+    std::string mask_file;
+    double mask_density = 1.0;
+    Eigen::Index mask_tile = 256;
+    double zero_q = 0.0;
+    double zero_kv = 0.0;
+    double zero_do = 0.0;
+    Eigen::Index zero_run = 256;
+    SparseShortcuts shortcuts;
+    std::string dump_mask_path; // Write the built mask as a dense .npy and exit (small n)
+    const MaskQuadtree* mask = nullptr; // Built during setup for sparse solvers
 };
 
 using SolverFn = std::function<AttentionMatrixf(const AttentionProblem&, const SolverConfig&)>;
@@ -71,6 +85,7 @@ struct SolverEntry {
     const char* description;
     SolverFn run;
     bool needs_power_of_4_p = false;
+    bool sparse = false; // Uses the mask quadtree
 };
 
 const std::vector<SolverEntry>& solver_registry() {
@@ -108,6 +123,11 @@ const std::vector<SolverEntry>& solver_registry() {
          [](const AttentionProblem& P, const SolverConfig& c) {
              return hybrid_attention(P.Q, P.K, P.V, c.p, c.block_size, c.grain);
          }},
+        {"sparse_fwd", "Query-owned mixed sparse forward, Algorithm 19 (uses -b, -g, mask and zero rows)",
+         [](const AttentionProblem& P, const SolverConfig& c) {
+             return owned_mixed_forward_attention(P.Q, P.K, P.V, *c.mask, c.shortcuts, c.block_size, c.grain).O;
+         },
+         /*needs_power_of_4_p=*/false, /*sparse=*/true},
     };
     return registry;
 }
@@ -204,6 +224,17 @@ void print_usage(const char* argv0) {
 #ifdef ATTENTION_USE_PAPI
         << "      --papi-events E Comma-separated PAPI events (default PAPI_L1_DCM,PAPI_L2_DCM,PAPI_L3_TCM)\n"
 #endif
+        << "\nSparsity (mask options apply to sparse_* solvers; zero rows to any solver):\n"
+        << "      --mask P        Mask pattern: none, block, band or element (default none)\n"
+        << "      --mask-density R  Fraction of allowed pairs for block/band/element (default 1)\n"
+        << "      --mask-tile T   Tile side for the block pattern (default 256)\n"
+        << "      --mask-file F   Dense (n, n) uint8/bool mask .npy instead of a pattern (small n)\n"
+        << "      --zero-q F      Fraction of query rows set exactly to zero\n"
+        << "      --zero-kv F     Fraction of positions with key and value rows both zero\n"
+        << "      --zero-do F     Fraction of upstream-gradient rows set to zero (backward)\n"
+        << "      --zero-run R    Zero rows come in aligned runs of R rows (default 256; 1 = dispersed)\n"
+        << "      --shortcuts S   Numerical shortcuts to enable: comma list of q, kv, do, or none (default all)\n"
+        << "      --dump-mask F   Write the built mask as a dense (n, n) uint8 .npy and exit (small n)\n"
         << "\nWorker count is controlled by the CILK_NWORKERS environment variable.\n";
 }
 
@@ -211,6 +242,33 @@ template <typename Int>
 bool parse_int(std::string_view str, Int& out) {
     auto [ptr, ec] = std::from_chars(str.data(), str.data() + str.size(), out);
     return ec == std::errc() && ptr == str.data() + str.size();
+}
+
+bool parse_fraction(const char* text, double& out) {
+    char* end = nullptr;
+    out = std::strtod(text, &end);
+    return end != text && *end == '\0' && out >= 0.0 && out <= 1.0;
+}
+
+bool parse_shortcuts(const std::string& text, SparseShortcuts& out) {
+    out = SparseShortcuts{false, false, false};
+    if (text == "none") {
+        return true;
+    }
+    std::stringstream ss(text);
+    std::string item;
+    while (std::getline(ss, item, ',')) {
+        if (item == "q") {
+            out.zero_q = true;
+        } else if (item == "kv") {
+            out.zero_kv = true;
+        } else if (item == "do") {
+            out.zero_do = true;
+        } else {
+            return false;
+        }
+    }
+    return true;
 }
 
 bool is_power_of_4(int p) {
@@ -375,6 +433,26 @@ int main(int argc, char** argv) {
             config.rusage = true;
         } else if (arg == "--memory") {
             config.memory = true;
+        } else if (arg == "--mask" && has_value) {
+            config.mask_pattern = argv[++i];
+        } else if (arg == "--mask-file" && has_value) {
+            config.mask_file = argv[++i];
+        } else if (arg == "--mask-density" && has_value) {
+            ok = parse_fraction(argv[++i], config.mask_density);
+        } else if (arg == "--mask-tile" && has_value) {
+            ok = parse_int(argv[++i], config.mask_tile) && config.mask_tile > 0;
+        } else if (arg == "--zero-q" && has_value) {
+            ok = parse_fraction(argv[++i], config.zero_q);
+        } else if (arg == "--zero-kv" && has_value) {
+            ok = parse_fraction(argv[++i], config.zero_kv);
+        } else if (arg == "--zero-do" && has_value) {
+            ok = parse_fraction(argv[++i], config.zero_do);
+        } else if (arg == "--zero-run" && has_value) {
+            ok = parse_int(argv[++i], config.zero_run) && config.zero_run > 0;
+        } else if (arg == "--dump-mask" && has_value) {
+            config.dump_mask_path = argv[++i];
+        } else if (arg == "--shortcuts" && has_value) {
+            ok = parse_shortcuts(argv[++i], config.shortcuts);
 #ifdef ATTENTION_USE_PAPI
         } else if (arg == "--papi-events" && has_value) {
             config.papi_events = argv[++i];
@@ -428,6 +506,58 @@ int main(int argc, char** argv) {
     if (backward != nullptr && problem.dO.rows() != N) {
         std::cerr << "Error: " << backward->name << " needs dO: use a (4, N, 64) problem file or --random\n";
         return 2;
+    }
+
+    // Sparsity setup (untimed): exactly zero rows, then the mask quadtree for sparse solvers.
+    // Each kind of zero row draws from its own seeded stream, so the levels vary independently.
+    const Eigen::Index zero_q_rows = zero_row_runs({&problem.Q}, config.zero_q, config.zero_run, config.seed ^ 0x51u);
+    const Eigen::Index zero_kv_rows =
+        zero_row_runs({&problem.K, &problem.V}, config.zero_kv, config.zero_run, config.seed ^ 0x4B56u);
+    Eigen::Index zero_do_rows = 0;
+    if (problem.dO.rows() == N) {
+        zero_do_rows = zero_row_runs({&problem.dO}, config.zero_do, config.zero_run, config.seed ^ 0x644Fu);
+    } else if (config.zero_do > 0.0) {
+        std::cerr << "Error: --zero-do needs a backward solver\n";
+        return 2;
+    }
+
+    const bool uses_mask = solver != nullptr && solver->sparse;
+    if (!uses_mask && (config.mask_pattern != "none" || !config.mask_file.empty())) {
+        std::cerr << "Error: --mask and --mask-file apply only to sparse_* solvers\n";
+        return 2;
+    }
+    MaskQuadtree mask;
+    if (uses_mask) {
+        try {
+            if (!config.mask_file.empty()) {
+                int64_t mask_n = 0;
+                const std::vector<uint8_t> dense = load_mask_npy(config.mask_file, mask_n);
+                if (mask_n != N) {
+                    throw std::runtime_error("mask is " + std::to_string(mask_n) + " x " + std::to_string(mask_n) +
+                                             " but N = " + std::to_string(N));
+                }
+                mask = build_mask_quadtree(detail::DensePattern{dense, N}, N, config.block_size);
+            } else {
+                mask = generate_mask(config.mask_pattern, N, config.block_size, config.mask_density,
+                                     config.mask_tile, config.seed ^ 0x4D41534Bu);
+            }
+        } catch (const std::exception& e) {
+            std::cerr << "Error: " << e.what() << "\n";
+            return 2;
+        }
+        config.mask = &mask;
+        std::cerr << "Mask: " << (config.mask_file.empty() ? config.mask_pattern : config.mask_file)
+                  << ", allowed pairs " << mask.nnz() << " (density "
+                  << static_cast<double>(mask.nnz()) / (static_cast<double>(N) * static_cast<double>(N))
+                  << "), stored nodes " << mask.nodes.size() << "\n";
+        if (!config.dump_mask_path.empty()) {
+            save_mask_npy(config.dump_mask_path, mask.to_dense(), N);
+            return 0;
+        }
+    }
+    if (zero_q_rows + zero_kv_rows + zero_do_rows > 0) {
+        std::cerr << "Zero rows: Q " << zero_q_rows << ", K/V " << zero_kv_rows << ", dO " << zero_do_rows
+                  << " (runs of " << config.zero_run << ")\n";
     }
 
     // Backward setup (untimed): one FA2 forward pass for O and the row-wise log-sum-exp L

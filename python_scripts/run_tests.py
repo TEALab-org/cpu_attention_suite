@@ -134,6 +134,165 @@ def backward_runs(workers: list[int]) -> list[SolverRun]:
     return runs
 
 
+def sparse_forward_runs(workers: list[int]) -> list[SolverRun]:
+    return [
+        SolverRun("sparse_fwd", ("-b", str(b), "-g", str(g)), w)
+        for w in workers for b, g in itertools.product((16, 64), (16, 256))
+    ]
+
+
+def is_sparse(run: SolverRun) -> bool:
+    return run.algorithm.startswith("sparse_")
+
+
+# Sparse cases: (label, mask kind, fraction of zero query rows, fraction of jointly zero K/V rows)
+SPARSE_CASES = [
+    ("full", "full", 0.0, 0.0),
+    ("block", "block", 0.0, 0.0),
+    ("band", "band", 0.0, 0.0),
+    ("element", "element", 0.0, 0.0),
+    ("diagonal", "diagonal", 0.0, 0.0),
+    ("zeroQ", "full", 0.5, 0.0),
+    ("zeroKV", "full", 0.0, 0.5),
+    ("allZeroQ", "full", 1.0, 0.0),
+    ("allZeroKV", "full", 0.0, 1.0),
+    ("block+zeros", "block", 0.4, 0.4),
+    ("element+zeros", "element", 0.4, 0.4),
+    ("band+zeros", "band", 0.5, 0.25),
+]
+
+
+def make_mask(kind: str, n: int, seed: int) -> np.ndarray:
+    """Dense 0/1 mask with every row nonempty (the diagonal is always allowed)."""
+    rng = np.random.default_rng(seed)
+    i, j = np.indices((n, n))
+    if kind == "full":
+        mask = np.ones((n, n), dtype=bool)
+    elif kind == "diagonal":
+        mask = np.zeros((n, n), dtype=bool)
+    elif kind == "band":
+        mask = np.abs(i - j) <= max(1, n // 8)
+    elif kind == "block":
+        tile = max(4, n // 6)
+        tiles = rng.random(((n + tile - 1) // tile,) * 2) < 0.4
+        mask = tiles[i // tile, j // tile]
+    elif kind == "element":
+        mask = rng.random((n, n)) < 0.15
+    else:
+        raise ValueError(kind)
+    return (mask | (i == j)).astype(np.uint8)
+
+
+def zero_row_runs(n: int, fraction: float, seed: int) -> np.ndarray:
+    """Row indices to zero, in aligned runs of about n/16 rows (as the solver's generator places them)."""
+    run = max(1, n // 16)
+    runs = (n + run - 1) // run
+    chosen = np.random.default_rng(seed).permutation(runs)[: int(round(fraction * runs))]
+    rows = [r for c in chosen for r in range(c * run, min(n, (c + 1) * run))]
+    return np.array(rows, dtype=int)
+
+
+def numpy_masked_attention(qkv: np.ndarray, mask: np.ndarray) -> np.ndarray:
+    q, k, v = (x.astype(np.float64) for x in qkv)
+    s = (q @ k.T) / np.sqrt(q.shape[1])
+    s = np.where(mask.astype(bool), s, -np.inf)
+    s -= s.max(axis=1, keepdims=True)
+    p = np.exp(s)
+    p /= p.sum(axis=1, keepdims=True)
+    return p @ v
+
+
+def load_sparse_case(problem: Problem, case: tuple, data_dir: Path) -> tuple[Path, Path, np.ndarray, np.ndarray]:
+    """Problem file with the case's zero rows and its dense mask file (cached)."""
+    label, kind, zero_q, zero_kv = case
+    stem = f"sparse_{problem.name}_{label.replace('+', '_')}"
+    problem_path, mask_path = data_dir / f"{stem}.npy", data_dir / f"{stem}_mask.npy"
+    if problem_path.exists() and mask_path.exists():
+        return problem_path, mask_path, np.load(problem_path), np.load(mask_path)
+    _, qkv = load_problem(problem, data_dir)
+    qkv = qkv.copy()
+    qkv[0, zero_row_runs(problem.n, zero_q, problem.seed + 1)] = 0.0
+    kv_rows = zero_row_runs(problem.n, zero_kv, problem.seed + 2)
+    qkv[1, kv_rows] = 0.0
+    qkv[2, kv_rows] = 0.0
+    mask = make_mask(kind, problem.n, problem.seed + 3)
+    np.save(problem_path, qkv)
+    np.save(mask_path, mask)
+    return problem_path, mask_path, qkv, mask
+
+
+def run_sparse_forward(runner: "SolverRunner", problem: Problem, runs: list[SolverRun], data_dir: Path,
+                       out_path: Path, results: "Results", verbose: bool) -> None:
+    for case in SPARSE_CASES:
+        problem_path, mask_path, qkv, mask = load_sparse_case(problem, case, data_dir)
+        ref = numpy_masked_attention(qkv, mask)
+        for run in runs:
+            masked = SolverRun(run.algorithm, (*run.args, "--mask-file", str(mask_path.relative_to(REPO_ROOT))),
+                               run.workers)
+            proc = runner.run(masked, problem_path, out_path)
+            label = f"{run.label} [{case[0]}]"
+            if proc.returncode != 0:
+                results.failures.append(f"exit code {proc.returncode}  {label}\n{proc.stderr.strip()}")
+                print(f"  FAIL  exit code {proc.returncode}  {label}\n{proc.stderr.strip()}")
+                continue
+            check(results, label, error_metrics(np.load(out_path), ref), (REF_MAX_ABS_TOL, REF_REL_FRO_TOL),
+                  verbose)
+
+
+def check_mask_generators(runner: "SolverRunner", data_dir: Path, results: "Results", verbose: bool) -> None:
+    """The quadtree must reproduce a dense mask exactly, and each built-in pattern must have its shape."""
+    n, b = 300, 16
+    out = data_dir / "dumped_mask.npy"
+    rel_out = str(out.relative_to(REPO_ROOT))
+    print(f"mask generators (n = {n}, b = {b})")
+
+    def dump(*args: str) -> np.ndarray | None:
+        proc = runner.run_args(["sparse_fwd", "--random", str(n), "-b", str(b), *args, "--dump-mask", rel_out], 1)
+        if proc.returncode != 0:
+            results.failures.append(f"exit code {proc.returncode}  dump {' '.join(args)}\n{proc.stderr.strip()}")
+            return None
+        return np.load(out)
+
+    def verdict(ok: bool, label: str) -> None:
+        if ok:
+            results.passed += 1
+            if verbose:
+                print(f"  ok    {label}")
+        else:
+            results.failures.append(label)
+            print(f"  FAIL  {label}")
+
+    i, j = np.indices((n, n))
+    dense = (np.random.default_rng(7).random((n, n)) < 0.3).astype(np.uint8)
+    dense_path = data_dir / "roundtrip_mask.npy"
+    np.save(dense_path, dense)
+    got = dump("--mask-file", str(dense_path.relative_to(REPO_ROOT)))
+    verdict(got is not None and np.array_equal(got, dense), "dense mask -> quadtree -> dense is exact")
+
+    got = dump("--mask", "band", "--mask-density", "0.2")
+    width = int((0.2 * n - 1) / 2)
+    verdict(got is not None and np.array_equal(got, (np.abs(i - j) <= width).astype(np.uint8)),
+            f"band pattern is |i - j| <= {width}")
+
+    tile = 32
+    got = dump("--mask", "block", "--mask-density", "0.4", "--mask-tile", str(tile))
+    ok = got is not None and bool(np.all(np.diag(got) == 1))
+    if ok:
+        off = got.astype(bool) & (i != j)
+        for ti in range(0, n, tile):
+            for tj in range(0, n, tile):
+                block = off[ti:ti + tile, tj:tj + tile]
+                interior = ~np.eye(*block.shape, k=tj - ti, dtype=bool) if ti == tj else np.ones_like(block)
+                vals = block[interior]
+                ok = ok and (vals.all() or not vals.any())
+    verdict(ok, f"block pattern: tiles of {tile} all-or-nothing, diagonal allowed")
+
+    got = dump("--mask", "element", "--mask-density", "0.3")
+    ok = got is not None and bool(np.all(np.diag(got) == 1)) and abs(got[i != j].mean() - 0.3) < 0.02
+    verdict(ok, "element pattern: density 0.3 +- 0.02, diagonal allowed")
+    out.unlink(missing_ok=True)
+
+
 def is_backward(run: SolverRun) -> bool:
     return run.algorithm.endswith("_bwd")
 
@@ -302,8 +461,9 @@ def run_problem(runner: SolverRunner, problem: Problem, runs: list[SolverRun], d
                 results: Results, verbose: bool) -> None:
     out_path = data_dir / f"out_{problem.name}.npy"
     print(f"{problem.name}")
-    forward = [r for r in runs if not is_backward(r)]
-    backward = [r for r in runs if is_backward(r)]
+    forward = [r for r in runs if not is_backward(r) and not is_sparse(r)]
+    backward = [r for r in runs if is_backward(r) and not is_sparse(r)]
+    sparse_forward = [r for r in runs if is_sparse(r) and not is_backward(r)]
 
     def execute(run: SolverRun, problem_path: Path) -> np.ndarray | None:
         proc = runner.run(run, problem_path, out_path)
@@ -316,6 +476,8 @@ def run_problem(runner: SolverRunner, problem: Problem, runs: list[SolverRun], d
 
     if forward:
         run_forward(runner, problem, forward, data_dir, out_path, execute, results, verbose)
+    if sparse_forward:
+        run_sparse_forward(runner, problem, sparse_forward, data_dir, out_path, results, verbose)
     if backward:
         problem_path, qkvdo = load_problem(problem, data_dir, with_dO=True)
         grads_ref = numpy_attention_backward(qkvdo)
@@ -374,7 +536,7 @@ def main() -> int:
         return 2
 
     workers = [int(w) for w in args.workers.split(",")]
-    runs = solver_runs(workers) + backward_runs(workers)
+    runs = solver_runs(workers) + backward_runs(workers) + sparse_forward_runs(workers)
     if args.algorithm:
         runs = [r for r in runs if r.algorithm in args.algorithm]
 
@@ -385,6 +547,8 @@ def main() -> int:
             run_problem(runner, problem, runs, data_dir, results, args.verbose)
         if not args.algorithm:
             check_memory(runner, results, args.verbose)
+        if not args.algorithm or "sparse_fwd" in args.algorithm:
+            check_mask_generators(runner, data_dir, results, args.verbose)
     finally:
         runner.close()
 

@@ -31,6 +31,26 @@ Backward algorithms: `standard_bwd`, `fa2_lockfree_bwd` (two sweeps, no locks), 
 log-sum-exp L, and `-o` writes the stacked (3, N, 64) [dQ, dK, dV].
 Run `build/attention_solver` with no arguments for the full option list.
 
+### Sparse attention
+
+`sparse_fwd` is the query-owned mixed sparse forward (Algorithm 19 of the exposition). It combines
+a structural mask with exactly zero query rows and jointly zero key/value rows. The mask is built
+as a quadtree during setup (untimed) from a pattern or a dense file:
+
+```bash
+CILK_NWORKERS=16 build/attention_solver sparse_fwd --random 262144 -b 64 -g 256 \
+  --mask block --mask-density 0.25 --mask-tile 256 --zero-q 0.3 --zero-run 256 -w 1 -r 5 --json
+```
+
+- `--mask none|block|band|element` with `--mask-density` (fraction of allowed pairs) and
+  `--mask-tile` (block pattern), or `--mask-file` for a dense `(n, n)` uint8 mask at small n.
+  The diagonal is always allowed, so every row is nonempty.
+- `--zero-q`, `--zero-kv`, `--zero-do`: fractions of rows set exactly to zero, placed in aligned runs
+  of `--zero-run` rows (1 disperses them). These apply to any solver, so dense solvers can run on the
+  same inputs.
+- `--shortcuts`: which zero-row shortcuts the sparse solver uses (`q,kv,do`, a subset, or `none`).
+- `--dump-mask F` writes the built mask as a dense `.npy` and exits (small n).
+
 ## Testing
 
 ```bash

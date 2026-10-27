@@ -2,7 +2,11 @@
 
 #include "attention_utilities.hpp"
 #include <cilk/cilk.h>
+#include <algorithm>
 #include <cstdint>
+#include <numeric>
+#include <random>
+#include <vector>
 
 namespace detail {
 
@@ -48,4 +52,35 @@ inline AttentionProblem generate_random_problem(Eigen::Index N, uint64_t seed, b
         detail::fill_uniform(problem.dO, seed, 3);
     }
     return problem;
+}
+
+/**
+ * Sets a fraction of rows exactly to zero in aligned runs of `run` rows: the n / run runs are
+ * shuffled with a seeded generator and the first round(fraction * runs) are zeroed in every given
+ * matrix (several matrices: jointly zero rows, as for K and V). Clustered runs let the interval
+ * tests c(I) = 0 fire; run = 1 disperses zero rows. Returns the number of rows zeroed.
+ */
+inline Eigen::Index zero_row_runs(std::initializer_list<AttentionMatrixf*> matrices, double fraction,
+                                  Eigen::Index run, uint64_t seed) {
+    if (fraction <= 0.0) {
+        return 0;
+    }
+    const Eigen::Index n = (*matrices.begin())->rows();
+    run = std::max<Eigen::Index>(1, std::min(run, n));
+    const Eigen::Index runs = (n + run - 1) / run;
+    std::vector<Eigen::Index> order(runs);
+    std::iota(order.begin(), order.end(), 0);
+    std::mt19937_64 rng(seed);
+    std::shuffle(order.begin(), order.end(), rng);
+    const auto chosen = static_cast<Eigen::Index>(std::llround(std::min(1.0, fraction) * static_cast<double>(runs)));
+    Eigen::Index zeroed = 0;
+    for (Eigen::Index k = 0; k < chosen; ++k) {
+        const Eigen::Index start = order[k] * run;
+        const Eigen::Index len = std::min(run, n - start);
+        for (AttentionMatrixf* m : matrices) {
+            m->middleRows(start, len).setZero();
+        }
+        zeroed += len;
+    }
+    return zeroed;
 }
