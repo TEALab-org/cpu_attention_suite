@@ -7,3 +7,4 @@ plots
 attn_*.out
 __pycache__
 diag_*.out
+old_logs
