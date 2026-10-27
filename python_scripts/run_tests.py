@@ -115,7 +115,8 @@ def backward_runs(workers: list[int]) -> list[SolverRun]:
     runs = []
     for w in workers:
         runs.append(SolverRun("standard_bwd", workers=w))
-        runs += [SolverRun("fa2_bwd", ("-b", str(b)), w) for b in (16, 64, 100)]
+        runs += [SolverRun("fa2_lockfree_bwd", ("-b", str(b)), w) for b in (16, 64, 100)]
+        runs += [SolverRun("fa2_locking_bwd", ("-b", str(b)), w) for b in (16, 64, 100)]
         runs += [
             SolverRun("summary_bwd", ("-b", str(b), "-p", str(p)), w)
             for b, p in itertools.product((16, 64), (1, 4, 16))

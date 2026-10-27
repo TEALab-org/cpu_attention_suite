@@ -41,12 +41,12 @@ from results_io import (  # noqa: E402
 )
 
 # Each algorithm keeps a fixed colour/marker (by its slot in results_io.ALGORITHMS) in every
-# panel and figure, regardless of which algorithms have data; a backward solver (fa2_bwd)
-# shares its forward counterpart's slot.
-# Validated categorical palette, slots 1-7 in order (blue, orange, aqua, yellow, magenta, green,
-# violet). Markers are a secondary encoding: several crossing lines need more than hue alone.
-COLORS = ["#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4", "#008300", "#6250d6"]
-MARKERS = ["o", "s", "^", "D", "v", "P", "X"]
+# panel and figure, regardless of which algorithms have data; a backward solver
+# (fa2_lockfree_bwd, summary_bwd, ...) shares its forward counterpart's slot.
+# Validated categorical palette, slots 1-8 in order (blue, orange, aqua, yellow, magenta, green,
+# violet, red). Markers are a secondary encoding: several crossing lines need more than hue alone.
+COLORS = ["#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4", "#008300", "#6250d6", "#e34948"]
+MARKERS = ["o", "s", "^", "D", "v", "P", "X", "<"]
 
 ROWS = [
     # (kind, metric key, y label)

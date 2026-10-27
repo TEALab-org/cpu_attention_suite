@@ -55,7 +55,7 @@ EXIT_INCOMPLETE = 3  # Stopped by --time-limit or a signal; rerun to resume
 # Sweep order per pass: earlier algorithms run first at each N
 DEFAULT_ALGORITHMS = {
     "forward": ["fa2", "summary", "query", "hybrid", "streamed", "standard"],
-    "backward": ["fa2_bwd", "summary_bwd", "owned_bwd", "hybrid_bwd", "standard_bwd"],
+    "backward": ["fa2_lockfree_bwd", "fa2_locking_bwd", "summary_bwd", "owned_bwd", "hybrid_bwd", "standard_bwd"],
 }
 
 # Statuses that are final for an experiment (complete or deliberately not run)
@@ -158,7 +158,8 @@ ALGORITHM_PARAMS = {
     "query": ["b", "g"],
     "hybrid": ["b", "g", "p"],
     "standard_bwd": [],
-    "fa2_bwd": ["b"],
+    "fa2_lockfree_bwd": ["b"],
+    "fa2_locking_bwd": ["b"],
     "summary_bwd": ["b", "p"],
     "owned_bwd": ["b", "g"],
     "hybrid_bwd": ["b", "g", "p"],
@@ -178,7 +179,7 @@ def powers_of_4_near(threads: int) -> List[int]:
 def tuning_grid(algorithm: str, threads: int) -> List[Dict[str, int]]:
     blocks = [16, 32, 64, 128, 256]
     grains = [64, 128, 256, 512, 1024, 2048]
-    if algorithm in ("fa2", "fa2_bwd"):
+    if algorithm in ("fa2", "fa2_lockfree_bwd", "fa2_locking_bwd"):
         return [{"b": b} for b in blocks + [512]]
     if algorithm in ("summary", "summary_bwd"):
         return [{"b": b, "p": p} for b, p in itertools.product(blocks, powers_of_4_near(threads))]

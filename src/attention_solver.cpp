@@ -125,10 +125,15 @@ const std::vector<BackwardEntry>& backward_registry() {
          [](const AttentionProblem& P, const AttentionMatrixf& O, const Eigen::VectorXf&, const SolverConfig&) {
              return standard_attention_backward_opencilk(P.Q, P.K, P.V, O, P.dO);
          }},
-        {"fa2_bwd", "FlashAttention-2 backward, lock-free K/V and Q sweeps (uses -b)",
+        {"fa2_lockfree_bwd", "FlashAttention-2 backward, lock-free K/V and Q sweeps (uses -b)",
          [](const AttentionProblem& P, const AttentionMatrixf& O, const Eigen::VectorXf& L, const SolverConfig& c) {
              return flash_attention_2_backward_lockfree_opencilk(P.Q, P.K, P.V, O, P.dO, L, /*causal=*/false,
                                                                   c.block_size, c.block_size);
+         }},
+        {"fa2_locking_bwd", "FlashAttention-2 backward, one K/V sweep, locked dQ updates (uses -b)",
+         [](const AttentionProblem& P, const AttentionMatrixf& O, const Eigen::VectorXf& L, const SolverConfig& c) {
+             return flash_attention_2_backward_locking_opencilk(P.Q, P.K, P.V, O, P.dO, L, /*causal=*/false,
+                                                                 c.block_size, c.block_size);
          }},
         {"summary_bwd", "ParallelDenseBackward, private gradient summaries (uses -b, -p)",
          [](const AttentionProblem& P, const AttentionMatrixf& O, const Eigen::VectorXf& L, const SolverConfig& c) {
@@ -173,11 +178,11 @@ void print_usage(const char* argv0) {
         << "Usage: " << argv0 << " <algorithm> (<problem.npy> | --random N) [options]\n\n"
         << "Forward algorithms:\n";
     for (const auto& entry : solver_registry()) {
-        std::cerr << "  " << std::left << std::setw(13) << entry.name << entry.description << "\n";
+        std::cerr << "  " << std::left << std::setw(18) << entry.name << entry.description << "\n";
     }
     std::cerr << "\nBackward algorithms:\n";
     for (const auto& entry : backward_registry()) {
-        std::cerr << "  " << std::left << std::setw(13) << entry.name << entry.description << "\n";
+        std::cerr << "  " << std::left << std::setw(18) << entry.name << entry.description << "\n";
     }
     std::cerr
         << "\nOptions:\n"

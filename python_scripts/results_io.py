@@ -15,10 +15,18 @@ ALGORITHMS = [
     ("query", "QueryParallel"),
     ("hybrid", "Hybrid"),
     ("owned", "ParallelOwned"),  # Backward only (owned_bwd)
+    ("fa2_locking", "FlashAttention-2 (locking)"),  # Backward only (fa2_locking_bwd)
 ]
+
+# Backward solvers whose name is not simply <forward>_bwd
+BACKWARD_KEYS = {
+    "fa2": "fa2_lockfree_bwd",
+}
 
 # Backward solvers named as in the paper; others share their forward counterpart's name
 BACKWARD_NAMES = {
+    "fa2_lockfree_bwd": "FlashAttention-2 (lock-free)",
+    "fa2_locking_bwd": "FlashAttention-2 (locking)",
     "summary_bwd": "ParallelDenseBackward",
     "owned_bwd": "ParallelOwnedBackward",
 }
@@ -45,8 +53,10 @@ def result_kind(kind: str, pass_name: str) -> str:
 
 
 def algorithm_key(base: str, pass_name: str) -> str:
-    """Solver name for an algorithm in a pass: fa2 -> fa2_bwd for the backward pass."""
-    return base if pass_name == "forward" else f"{base}_bwd"
+    """Solver name for an algorithm in a pass: summary -> summary_bwd, fa2 -> fa2_lockfree_bwd."""
+    if pass_name == "forward":
+        return base
+    return BACKWARD_KEYS.get(base, f"{base}_bwd")
 
 
 def display_name(key: str) -> str:

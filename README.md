@@ -24,7 +24,8 @@ CILK_NWORKERS=16 build/attention_solver fa2 data/problem_65536_64.npy -b 64 -w 1
 
 Algorithms: `reference`, `standard`, `streamed`, `fa2`, `recursive`, `summary` (alias `rec`;
 requires `-p` to be a power of 4, defaulting to `CILK_NWORKERS`), `query`, `hybrid` (any `p`).
-Backward algorithms: `standard_bwd`, `fa2_bwd`, `summary_bwd` (ParallelDenseBackward; power-of-4
+Backward algorithms: `standard_bwd`, `fa2_lockfree_bwd` (two sweeps, no locks), `fa2_locking_bwd`
+(one sweep, locked dQ updates), `summary_bwd` (ParallelDenseBackward; power-of-4
 `-p`), `owned_bwd` (ParallelOwnedBackward; `-g`), `hybrid_bwd` (any `p`). They also need the upstream gradient dO, from a
 (4, N, 64) [Q, K, V, dO] problem file or `--random`; an untimed FA2 forward pass supplies O and the
 log-sum-exp L, and `-o` writes the stacked (3, N, 64) [dQ, dK, dV].
