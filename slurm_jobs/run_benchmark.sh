@@ -50,7 +50,7 @@ if [[ "${SPARSITY:-0}" == "1" ]]; then
   if [[ "$PASS" == "backward" ]]; then ALGORITHMS="${ALGORITHMS:-sparse_bwd}"; else ALGORITHMS="${ALGORITHMS:-sparse_fwd}"; fi
   PHASES="${PHASES:-build,tune,sparsity}"
 elif [[ "$PASS" == "backward" ]]; then
-  ALGORITHMS="${ALGORITHMS:-fa2_lockfree_bwd,fa2_locking_bwd,summary_bwd,owned_bwd,hybrid_bwd,standard_bwd}"
+  ALGORITHMS="${ALGORITHMS:-fa2_lockfree_bwd,fa2_locking_bwd,summary_bwd,owned_bwd,hybrid_bwd}"
 else
   ALGORITHMS="${ALGORITHMS:-fa2,summary,query,hybrid}"
 fi
