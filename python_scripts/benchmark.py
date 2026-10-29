@@ -354,7 +354,6 @@ class Runner:
             "pass": self.args.pass_name,
             "name": exp.algorithm,
             "N": exp.n,
-            "n": exp.n,
             "d": D,
             "threads": self.threads,
             "params": exp.params,
@@ -367,13 +366,6 @@ class Runner:
             "times": [],
             "status": "running",
         }
-        # Flat aliases matching the original result files used by the plotting notebooks
-        if "b" in exp.params:
-            record["block_size"] = record["base_size"] = exp.params["b"]
-        if "g" in exp.params:
-            record["grain"] = exp.params["g"]
-        if "p" in exp.params:
-            record["p"] = exp.params["p"]
         if exp.sparsity is not None:
             record["sparsity_type"] = exp.sparsity["type"]
             record["sparsity_level"] = exp.sparsity["level"]
