@@ -137,6 +137,7 @@ Results go to `$SCRATCH/cpu_attention_results/<label>`. Settings such as `REPS`,
 ```bash
 python python_scripts/plot_results.py --results-dir <results-dir> --output-dir <out> [--normalize] [--pass backward]
 python python_scripts/make_table.py --results-dir <results-dir> --output-dir <out> [--n 1048576] [--pass backward]
+python python_scripts/make_tuning_table.py --results-dir <results-dir> --output-dir <out> [--pass backward] [--fragment]
 python python_scripts/plot_sparsity.py --results-dir <results-dir> --output-dir <out> [--pass backward] [--baseline self]
 python python_scripts/plot_sparsity_runtime.py --results-dir <results-dir> --output-dir <out> [--pass backward]
 ```
@@ -144,6 +145,8 @@ python python_scripts/plot_sparsity_runtime.py --results-dir <results-dir> --out
 `plot_results.py` draws runtime and L1/L2/L3 misses over N with one column per architecture;
 `--normalize` divides by N^2. `make_table.py` writes a LaTeX (booktabs, multirow) table at one N; `--memory` adds each
 algorithm's peak memory above its inputs (GiB) from the timing sweep.
+`make_tuning_table.py` writes a single-column table of the tuned b, g and p; `--fragment` leaves out
+the table environment so the forward and backward tables can sit side by side in minipages.
 `plot_sparsity.py` draws one panel per architecture with one series per kind of sparsity: speedup
 over the fastest dense solver at the same N (or, with `--baseline self`, over the sparse solver with
 nothing sparse) against the achieved work reduction, with the ideal speedup as a dashed diagonal.

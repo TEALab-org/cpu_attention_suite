@@ -6,7 +6,9 @@ and processor budget p read from <label>/tune/best.json (or tune_backward/best.j
 --pass backward). --times adds each winner's median runtime at the tuning size. The script also prints each algorithm's best and worst tuning configuration to
 stdout, showing how much the choice mattered.
 
-The table uses table (pass --wide for table*), with the caption below the tabular.
+The table uses table (pass --wide for table*), with the caption below the tabular. --fragment
+leaves out the table environment, so the tabular, caption and label can go inside a minipage of
+your own float, e.g. the forward and backward tables side by side in one table*.
 Requires \\usepackage{booktabs} and \\usepackage{multirow}.
 
 Example:
@@ -58,7 +60,8 @@ def format_params(params: dict) -> str:
 
 
 def build_table(results_dir: Path, labels: List[str], algorithms: List[str], pass_name: str, times: bool,
-                caption: Optional[str], latex_label: str, wide: bool) -> Tuple[str, List[str], List[str]]:
+                caption: Optional[str], latex_label: str, wide: bool,
+                fragment: bool = False) -> Tuple[str, List[str], List[str]]:
     notes: List[str] = []
     spreads: List[str] = []
     tune_sizes = set()
@@ -115,6 +118,8 @@ def build_table(results_dir: Path, labels: List[str], algorithms: List[str], pas
         rf"\end{{{env}}}",
         "",
     ]
+    if fragment:
+        lines = lines[1:-2] + [""]  # Drop \begin{table}[t] and \end{table}; \caption works in any float
     return "\n".join(lines), notes, spreads
 
 
@@ -146,6 +151,9 @@ def main() -> int:
     parser.add_argument("--times", action="store_true",
                         help="Add each chosen configuration's median runtime (widest; pair with --wide)")
     parser.add_argument("--wide", action="store_true", help="Use table* to span both columns")
+    parser.add_argument("--fragment", action="store_true",
+                        help="Leave out the table environment, for a minipage inside your own float; "
+                             "default stem gets a _fragment suffix")
     parser.add_argument("--name", default=None, help="Output file stem (default: dense_<pass>_tuning_table)")
     parser.add_argument("--caption", default=None, help="Override the generated caption")
     parser.add_argument("--latex-label", default=None, help=r"\label key (default: tab:dense-<pass>-tuning)")
@@ -155,7 +163,7 @@ def main() -> int:
     algorithms = [a for a in (args.algorithms or DEFAULT_ALGORITHMS[args.pass_name]).split(",") if a]
     table, notes, spreads = build_table(args.results_dir, labels, algorithms, args.pass_name, args.times,
                                         args.caption, args.latex_label or f"tab:dense-{args.pass_name}-tuning",
-                                        args.wide)
+                                        args.wide, args.fragment)
     for note in notes:
         print(f"Note: {note}", file=sys.stderr)
 
@@ -164,7 +172,8 @@ def main() -> int:
         print("  " + line)
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
-    out = args.output_dir / f"{args.name or f'dense_{args.pass_name}_tuning_table'}.tex"
+    stem = f"dense_{args.pass_name}_tuning_table" + ("_fragment" if args.fragment else "")
+    out = args.output_dir / f"{args.name or stem}.tex"
     out.write_text(table)
     print(f"Wrote {out}")
     return 0
