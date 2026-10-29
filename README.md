@@ -138,6 +138,7 @@ Results go to `$SCRATCH/cpu_attention_results/<label>`. Settings such as `REPS`,
 python python_scripts/plot_results.py --results-dir <results-dir> --output-dir <out> [--normalize] [--pass backward]
 python python_scripts/make_table.py --results-dir <results-dir> --output-dir <out> [--n 1048576] [--pass backward]
 python python_scripts/plot_sparsity.py --results-dir <results-dir> --output-dir <out> [--pass backward] [--baseline self]
+python python_scripts/plot_sparsity_runtime.py --results-dir <results-dir> --output-dir <out> [--pass backward]
 ```
 
 `plot_results.py` draws runtime and L1/L2/L3 misses over N with one column per architecture;
@@ -145,6 +146,8 @@ python python_scripts/plot_sparsity.py --results-dir <results-dir> --output-dir 
 `plot_sparsity.py` draws one panel per architecture with one series per kind of sparsity: speedup
 over the fastest dense solver at the same N (or, with `--baseline self`, over the sparse solver with
 nothing sparse) against the achieved work reduction, with the ideal speedup as a dashed diagonal.
+`plot_sparsity_runtime.py` draws the same panels with runtime on the y axis instead, plus the ideal
+(the nothing-sparse time scaled by 1 - s, dashed) and the fastest dense solver's time (dotted).
 
 ## Licenses
 

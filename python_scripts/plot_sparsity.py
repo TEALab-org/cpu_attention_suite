@@ -95,13 +95,54 @@ def level_label(level: float) -> str:
     return f"{100 * level:g}\\%" if plt.rcParams["text.usetex"] else f"{100 * level:g}%"
 
 
-def plot(results_dir: Path, labels: List[str], pass_name: str, baseline: str, include_partial: bool,
-         usetex: bool):
+def set_level_ticks(ax, max_x: float) -> None:
+    """x ticks at round sparsity levels up to the largest work reduction plotted."""
+    ticks = [t for t in LEVEL_TICKS if 1 / (1 - t) <= max_x * 1.5]
+    ax.set_xlim(1 / 1.25, max_x * 1.3)
+    ax.xaxis.set_major_locator(FixedLocator([1 / (1 - t) for t in ticks]))
+    ax.xaxis.set_major_formatter(plt.FixedFormatter([level_label(t) for t in ticks]))
+    ax.xaxis.set_minor_locator(NullLocator())
+    ax.xaxis.set_minor_formatter(NullFormatter())
+
+
+def set_style(usetex: bool) -> None:
     if usetex:
         plt.rcParams.update({"text.usetex": True, "font.family": "serif",
                              "font.serif": ["Computer Modern Serif"]})
     else:
         plt.rcParams.update({"font.family": "serif"})
+
+
+def sparsity_records(results_dir: Path, label: str, pass_name: str, include_partial: bool) -> List[dict]:
+    return load_records(results_dir / label / result_kind("sparsity", pass_name), include_partial)
+
+
+def add_legend_and_subtitle(fig, ordered: List, pass_name: str, sizes: set, include_partial: bool) -> None:
+    """Legend in as many columns as fit the figure width (at most 4), then the subtitle below it."""
+    renderer = fig.canvas.get_renderer()
+    legend = None
+    for ncol in range(min(len(ordered), 4), 0, -1):
+        if legend is not None:
+            legend.remove()
+        legend = fig.legend(ordered, [h.get_label() for h in ordered], loc="upper center", ncol=ncol,
+                            frameon=False, fontsize=9, bbox_to_anchor=(0.5, 0.995), labelcolor=TEXT)
+        if legend.get_window_extent(renderer).width <= 0.98 * fig.bbox.width:
+            break
+    if ncol < min(len(ordered), 4):  # Taller legend: move the subtitle and panels below it
+        legend_bottom = legend.get_window_extent(renderer).y0 / fig.bbox.height
+        fig.subplots_adjust(top=legend_bottom - 0.12)
+        subtitle_y = legend_bottom - 0.05
+    else:
+        subtitle_y = 0.80
+    size = ", ".join(rf"$N = 2^{{{n.bit_length() - 1}}}$" for n in sorted(sizes))
+    fig.text(0.5, subtitle_y, f"Sparse {pass_name} pass, d = 64" + (f", {size}" if size else "")
+             + (" (hollow markers: incomplete repetitions)" if include_partial else ""),
+             ha="center", color=MUTED, fontsize=9)
+
+
+def plot(results_dir: Path, labels: List[str], pass_name: str, baseline: str, include_partial: bool,
+         usetex: bool):
+    set_style(usetex)
 
     n_cols = len(labels)
     fig, axes = plt.subplots(1, n_cols, figsize=(3.6 * n_cols, 3.4), sharey=True, squeeze=False)
@@ -115,7 +156,7 @@ def plot(results_dir: Path, labels: List[str], pass_name: str, baseline: str, in
     for c, label in enumerate(labels):
         ax = axes[c]
         style_axis(ax)
-        records = load_records(results_dir / label / result_kind("sparsity", pass_name), include_partial)
+        records = sparsity_records(results_dir, label, pass_name, include_partial)
         none = [r for r in records if r.get("sparsity_type") == "none"]
         note = None
         base_ms = None
@@ -163,39 +204,15 @@ def plot(results_dir: Path, labels: List[str], pass_name: str, baseline: str, in
             ax.set_ylabel("Speedup", color=TEXT, fontsize=9)
 
     # Ideal speedup y = x, and ticks at round sparsity levels, on every panel
-    ticks = [t for t in LEVEL_TICKS if 1 / (1 - t) <= max_x * 1.5]
     for c, ax in enumerate(axes):
         if c not in empty:
             ax.plot([1, max_x * 1.3], [1, max_x * 1.3], color=MUTED, linestyle="--", linewidth=1.0, zorder=0)
-        ax.set_xlim(1 / 1.25, max_x * 1.3)
-        ax.xaxis.set_major_locator(FixedLocator([1 / (1 - t) for t in ticks]))
-        ax.xaxis.set_major_formatter(plt.FixedFormatter([level_label(t) for t in ticks]))
-        ax.xaxis.set_minor_locator(NullLocator())
-        ax.xaxis.set_minor_formatter(NullFormatter())
+        set_level_ticks(ax, max_x)
         ax.yaxis.set_major_formatter(FuncFormatter(lambda y, _pos: f"{y:g}"))
     ideal = plt.Line2D([], [], color=MUTED, linestyle="--", linewidth=1.0, label="Ideal")
 
     ordered = [handles[k] for k, _ in KINDS if k in handles] + [ideal]
-    # As many legend columns as fit the figure width (at most 4)
-    renderer = fig.canvas.get_renderer()
-    legend = None
-    for ncol in range(min(len(ordered), 4), 0, -1):
-        if legend is not None:
-            legend.remove()
-        legend = fig.legend(ordered, [h.get_label() for h in ordered], loc="upper center", ncol=ncol,
-                            frameon=False, fontsize=9, bbox_to_anchor=(0.5, 0.995), labelcolor=TEXT)
-        if legend.get_window_extent(renderer).width <= 0.98 * fig.bbox.width:
-            break
-    if ncol < min(len(ordered), 4):  # Taller legend: move the subtitle and panels below it
-        legend_bottom = legend.get_window_extent(renderer).y0 / fig.bbox.height
-        fig.subplots_adjust(top=legend_bottom - 0.12)
-        subtitle_y = legend_bottom - 0.05
-    else:
-        subtitle_y = 0.80
-    size = ", ".join(rf"$N = 2^{{{n.bit_length() - 1}}}$" for n in sorted(sizes))
-    fig.text(0.5, subtitle_y, f"Sparse {pass_name} pass, d = 64" + (f", {size}" if size else "")
-             + (" (hollow markers: incomplete repetitions)" if include_partial else ""),
-             ha="center", color=MUTED, fontsize=9)
+    add_legend_and_subtitle(fig, ordered, pass_name, sizes, include_partial)
     return fig
 
 
