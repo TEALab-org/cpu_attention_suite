@@ -3,6 +3,8 @@
 
 Rows are grouped by architecture (one group per label), one row per algorithm; columns are
 the median runtime from the timing sweep and the median L1/L2/L3 misses from the PAPI sweep.
+--memory adds the peak resident memory each algorithm adds above its inputs (GiB), measured on
+the first solve of the timing sweep's experiment.
 Each cache-miss column gets a single power-of-ten scale in its header so values stay short,
 and the best (lowest) value in each architecture group is set in bold. Missing results are
 shown as "--". The table uses table* (spanning both columns of a two-column paper; pass
@@ -33,8 +35,14 @@ DEFAULT_ALGORITHMS = {
     "backward": "fa2_lockfree_bwd,fa2_locking_bwd,summary_bwd,owned_bwd,hybrid_bwd",
 }
 
-# (key, short header); "time" comes from the timing sweep, the rest from the PAPI sweep
-COLUMNS = [("time", "Runtime")] + [(event, level) for event, level in PAPI_EVENTS]
+# (key, short header, unit); "time" and "memory" come from the timing sweep, the rest from the PAPI sweep
+SWEEP_KEYS = {"time", "memory"}
+MISS_COLUMNS = [(event, level) for event, level in PAPI_EVENTS]
+
+
+def table_columns(memory: bool) -> List[Tuple[str, str, str]]:
+    """Leading (non-miss) columns: runtime, then memory with --memory."""
+    return [("time", "Runtime", "(s)")] + ([("memory", "Memory", "(GiB)")] if memory else [])
 
 
 def find_value(records: List[dict], algorithm: str, n: int, key: str) -> Optional[Tuple[float, bool]]:
@@ -44,6 +52,10 @@ def find_value(records: List[dict], algorithm: str, n: int, key: str) -> Optiona
             continue
         if key == "time":
             values = [t / 1000.0 for t in rec.get("times", [])]
+        elif key == "memory":
+            # One measurement per experiment; without a peak reset it is the process-wide peak instead
+            memory = rec.get("memory") or {}
+            values = [memory["peak_delta_bytes"] / 2**30] if memory.get("peak_reset") else []
         else:
             values = [float(c[key]) for c in rec.get("counters", []) if key in c]
         if values:
@@ -68,18 +80,20 @@ def format_number(value: float, sig: int = 3) -> str:
 
 def build_table(results_dir: Path, labels: List[str], algorithms: List[str], n: int, include_partial: bool,
                 bold_best: bool, caption: Optional[str], label: str, wide: bool,
-                pass_name: str) -> Tuple[str, List[str]]:
+                pass_name: str, memory: bool = False) -> Tuple[str, List[str]]:
+    lead = table_columns(memory)
+    columns = [(key, header) for key, header, _ in lead] + MISS_COLUMNS
     warnings = []
     values: Dict[Tuple[str, str, str], Tuple[float, bool]] = {}
     for arch in labels:
         records = {kind: load_records(results_dir / arch / result_kind(kind, pass_name), include_partial)
                    for kind in ("sweep", "papi")}
-        missing = {"timing": [], "PAPI": []}
+        missing = {"timing": [], "memory": [], "PAPI": []}
         for algorithm in algorithms:
-            for key, _ in COLUMNS:
-                found = find_value(records["sweep" if key == "time" else "papi"], algorithm, n, key)
+            for key, _ in columns:
+                found = find_value(records["sweep" if key in SWEEP_KEYS else "papi"], algorithm, n, key)
                 if found is None:
-                    kind = "timing" if key == "time" else "PAPI"
+                    kind = {"time": "timing", "memory": "memory"}.get(key, "PAPI")
                     if algorithm not in missing[kind]:
                         missing[kind].append(algorithm)
                 else:
@@ -88,12 +102,10 @@ def build_table(results_dir: Path, labels: List[str], algorithms: List[str], n: 
             if algs:
                 warnings.append(f"{arch}: no {kind} results at N = {n} for {', '.join(algs)}")
 
-    # Runtimes print in seconds; cache-miss columns share one scale each, shown in the header
-    exponents = {key: 0 if key == "time" else column_exponent([v for (_, _, k), (v, _) in values.items() if k == key])
-                 for key, _ in COLUMNS}
-    # Second header row: units for the runtime, the power-of-ten scale for each miss column
-    units = ["(s)"] + [rf"($10^{{{exponents[key]}}}$)" if exponents[key] else "" for key, _ in COLUMNS[1:]]
-    n_miss = len(COLUMNS) - 1
+    # Runtime and memory print in their units; cache-miss columns share one scale each, shown in the header
+    exponents = {key: 0 if key in SWEEP_KEYS else column_exponent([v for (_, _, k), (v, _) in values.items() if k == key])
+                 for key, _ in columns}
+    n_lead, n_miss = len(lead), len(MISS_COLUMNS)
 
     any_partial = any(partial for _, partial in values.values())
     env = "table*" if wide else "table"
@@ -101,17 +113,20 @@ def build_table(results_dir: Path, labels: List[str], algorithms: List[str], n: 
         rf"\begin{{{env}}}[t]",
         r"  \centering",
         r"  \small",
-        r"  \begin{tabular}{ll" + "r" * len(COLUMNS) + "}",
+        r"  \begin{tabular}{ll" + "r" * len(columns) + "}",
         r"    \toprule",
-        rf"    & & Runtime & \multicolumn{{{n_miss}}}{{c}}{{Cache misses}} \\",
-        rf"    \cmidrule(lr){{4-{3 + n_miss}}}",
+        "    & & " + " & ".join(header for _, header, _ in lead) + rf" & \multicolumn{{{n_miss}}}{{c}}{{Cache misses}} \\",
+        rf"    \cmidrule(lr){{{3 + n_lead}-{2 + n_lead + n_miss}}}",
+        # Second header row: units for the leading columns, the power-of-ten scale for each miss column
         "    Architecture & Algorithm & " + " & ".join(
-            [units[0]] + [f"{header} {unit}".strip() for (_, header), unit in zip(COLUMNS[1:], units[1:])]) + r" \\",
+            [unit for _, _, unit in lead]
+            + [f"{header} ($10^{{{exponents[key]}}}$)" if exponents[key] else header
+               for key, header in MISS_COLUMNS]) + r" \\",
         r"    \midrule",
     ]
     for g, arch in enumerate(labels):
         best = {}
-        for key, _ in COLUMNS:
+        for key, _ in columns:
             group = [values[(arch, a, key)][0] for a in algorithms if (arch, a, key) in values]
             best[key] = min(group) if bold_best and len(group) > 1 else None
 
@@ -121,7 +136,7 @@ def build_table(results_dir: Path, labels: List[str], algorithms: List[str], n: 
                      rf"{threads} cores\end{{tabular}}}}" if threads else rf"\multirow{{{len(algorithms)}}}{{*}}{{{name}}}")
         for i, algorithm in enumerate(algorithms):
             cells = [arch_cell if i == 0 else "", display_name(algorithm)]
-            for key, _ in COLUMNS:
+            for key, _ in columns:
                 if (arch, algorithm, key) not in values:
                     cells.append("--")
                     continue
@@ -138,7 +153,7 @@ def build_table(results_dir: Path, labels: List[str], algorithms: List[str], n: 
     lines += [
         r"    \bottomrule",
         r"  \end{tabular}",
-        rf"  \caption{{{caption or default_caption(n, bold_best, any_partial, pass_name)}}}",
+        rf"  \caption{{{caption or default_caption(n, bold_best, any_partial, pass_name, memory)}}}",
         rf"  \label{{{label}}}",
         rf"\end{{{env}}}",
         "",
@@ -146,12 +161,16 @@ def build_table(results_dir: Path, labels: List[str], algorithms: List[str], n: 
     return "\n".join(lines), warnings
 
 
-def default_caption(n: int, bold_best: bool, any_partial: bool, pass_name: str) -> str:
+def default_caption(n: int, bold_best: bool, any_partial: bool, pass_name: str, memory: bool = False) -> str:
     exp = n.bit_length() - 1
     size = rf"$N = 2^{{{exp}}}$" if 2**exp == n else rf"$N = {n}$"
     text = (rf"Dense {pass_name} pass at {size}, $d = 64$, using all cores of each node. Runtime is the median "
             r"over repetitions of the timing sweep; cache misses are medians from the PAPI sweep, "
             r"summed over all worker threads.")
+    if memory:
+        inputs = r"$Q$, $K$, $V$" if pass_name == "forward" else r"$Q$, $K$, $V$, $O$, $dO$"
+        text += (rf" Memory is the peak resident memory the algorithm adds above its inputs ({inputs}) "
+                 r"during its first solve, including its outputs.")
     if bold_best:
         text += r" The lowest value per architecture is in bold."
     text += r" -- marks results not yet available."
@@ -174,25 +193,29 @@ def main() -> int:
                              f"{DEFAULT_ALGORITHMS['forward']}; backward {DEFAULT_ALGORITHMS['backward']})")
     parser.add_argument("--name", default=None, help="Output file stem (default: dense_<pass>_table_N<n>)")
     parser.add_argument("--caption", default=None, help="Override the generated caption")
-    parser.add_argument("--latex-label", default=None, help=r"\label key (default: tab:dense-<pass>-N<n>)")
+    parser.add_argument("--latex-label", default=None, help=r"\label key (default: tab:dense-<pass>-N<n>, plus -memory with --memory)")
     parser.add_argument("--include-partial", action="store_true",
                         help="Use unfinished experiments too, marked with a dagger")
     parser.add_argument("--single-column", action="store_true",
                         help="Use table instead of the default table* (which spans both columns)")
     parser.add_argument("--no-bold", action="store_true", help="Do not bold the best value per architecture")
+    parser.add_argument("--memory", action="store_true",
+                        help="Add a column with each algorithm's peak memory above its inputs (GiB); "
+                             "default stem gets a _memory suffix")
     args = parser.parse_args()
 
     labels = [label for label in args.labels.split(",") if label]
     algorithms = [a for a in (args.algorithms or DEFAULT_ALGORITHMS[args.pass_name]).split(",") if a]
     table, warnings = build_table(args.results_dir, labels, algorithms, args.n, args.include_partial,
                                   not args.no_bold, args.caption,
-                                  args.latex_label or f"tab:dense-{args.pass_name}-N{args.n}",
-                                  not args.single_column, args.pass_name)
+                                  args.latex_label or f"tab:dense-{args.pass_name}-N{args.n}" + ("-memory" if args.memory else ""),
+                                  not args.single_column, args.pass_name, args.memory)
     for warning in warnings:
         print(f"Note: {warning}", file=sys.stderr)
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
-    out = args.output_dir / f"{args.name or f'dense_{args.pass_name}_table_N{args.n}'}.tex"
+    stem = f"dense_{args.pass_name}_table_N{args.n}" + ("_memory" if args.memory else "")
+    out = args.output_dir / f"{args.name or stem}.tex"
     out.write_text(table)
     print(f"Wrote {out}")
     return 0
