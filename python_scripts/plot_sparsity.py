@@ -35,7 +35,7 @@ import matplotlib.pyplot as plt  # noqa: E402
 from matplotlib.ticker import FixedLocator, FuncFormatter, NullFormatter, NullLocator  # noqa: E402
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from plot_results import COLORS, GRID, MARKERS, MUTED, TEXT  # noqa: E402
+from plot_results import COLORS, GRID, MARKERS, MUTED, PANEL_TITLE_SIZE, TEXT, TITLE, TITLE_SIZE  # noqa: E402
 from results_io import PASSES, display_name, load_records, machine_title, result_kind  # noqa: E402
 
 # Fixed order, colour and marker per kind of sparsity, whatever has data
@@ -128,16 +128,14 @@ def add_legend_and_subtitle(fig, ordered: List, pass_name: str, sizes: set, incl
                             frameon=False, fontsize=9, bbox_to_anchor=(0.5, 0.995), labelcolor=TEXT)
         if legend.get_window_extent(renderer).width <= 0.98 * fig.bbox.width:
             break
-    if ncol < min(len(ordered), 4):  # Taller legend: move the subtitle and panels below it
-        legend_bottom = legend.get_window_extent(renderer).y0 / fig.bbox.height
-        fig.subplots_adjust(top=legend_bottom - 0.12)
-        subtitle_y = legend_bottom - 0.05
-    else:
-        subtitle_y = 0.80
+    # Subtitle and panels sit below the legend's measured bottom edge, however many rows it takes
+    legend_bottom = legend.get_window_extent(renderer).y0 / fig.bbox.height
+    fig.subplots_adjust(top=legend_bottom - 0.17)
+    subtitle_y = legend_bottom - 0.06
     size = ", ".join(rf"$N = 2^{{{n.bit_length() - 1}}}$" for n in sorted(sizes))
     fig.text(0.5, subtitle_y, f"Sparse {pass_name} pass, d = 64" + (f", {size}" if size else "")
              + (" (hollow markers: incomplete repetitions)" if include_partial else ""),
-             ha="center", color=MUTED, fontsize=9)
+             ha="center", color=TITLE, fontsize=TITLE_SIZE)
 
 
 def plot(results_dir: Path, labels: List[str], pass_name: str, baseline: str, include_partial: bool,
@@ -198,7 +196,7 @@ def plot(results_dir: Path, labels: List[str], pass_name: str, baseline: str, in
                             markeredgecolor=COLORS[slot], markeredgewidth=1.2)
                 handles.setdefault(kind, line)
             ax.text(0.03, 0.97, note, transform=ax.transAxes, ha="left", va="top", color=MUTED, fontsize=8)
-        ax.set_title(machine_title(results_dir, label), color=TEXT, fontsize=11)
+        ax.set_title(machine_title(results_dir, label), color=TITLE, fontsize=PANEL_TITLE_SIZE)
         ax.set_xlabel(r"Sparsity level $s$ (work reduction $1/(1-s)$)", color=TEXT, fontsize=9)
         if c == 0:
             ax.set_ylabel("Speedup", color=TEXT, fontsize=9)

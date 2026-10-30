@@ -32,7 +32,7 @@ import matplotlib.pyplot as plt  # noqa: E402
 from matplotlib.ticker import FuncFormatter  # noqa: E402
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from plot_results import COLORS, MARKERS, MUTED, TEXT  # noqa: E402
+from plot_results import COLORS, MARKERS, MUTED, PANEL_TITLE_SIZE, TEXT, TITLE  # noqa: E402
 from plot_sparsity import (  # noqa: E402
     KINDS, add_legend_and_subtitle, dense_baseline, set_level_ticks, set_style, sparsity_records, style_axis,
     work_reduction,
@@ -92,7 +92,7 @@ def plot(results_dir: Path, labels: List[str], pass_name: str, include_partial: 
                         ha="left", va="bottom", color=MUTED, fontsize=8)
             references.append((ax, statistics.median(none[0]["times"]) / 1000 if none else None,
                                dense[1] / 1000 if dense else None))
-        ax.set_title(machine_title(results_dir, label), color=TEXT, fontsize=11)
+        ax.set_title(machine_title(results_dir, label), color=TITLE, fontsize=PANEL_TITLE_SIZE)
         ax.set_xlabel(r"Sparsity level $s$ (work reduction $1/(1-s)$)", color=TEXT, fontsize=9)
         if c == 0:
             ax.set_ylabel("Runtime (s)", color=TEXT, fontsize=9)

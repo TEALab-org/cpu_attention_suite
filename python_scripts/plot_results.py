@@ -65,6 +65,11 @@ DEFAULT_ALGORITHMS = {
 TEXT = "#1f1f1e"
 MUTED = "#6b6a63"
 GRID = "#e4e3dd"
+# The figure title (pass and d) and the panel titles (machine names) are black and larger than the
+# rest of the text, to stand out
+TITLE = "black"
+TITLE_SIZE = 13
+PANEL_TITLE_SIZE = 11
 
 
 @dataclass
@@ -185,7 +190,7 @@ def plot(results_dir: Path, labels: List[str], include_partial: bool, usetex: bo
                         color=MUTED, fontsize=9, style="italic")
             row_has_data |= plotted
             if r == 0:
-                ax.set_title(machine_title(results_dir, label), color=TEXT, fontsize=11)
+                ax.set_title(machine_title(results_dir, label), color=TITLE, fontsize=PANEL_TITLE_SIZE)
             if c == 0:
                 if normalize:
                     ylabel = "Time per pair (ns)" if metric == "time" else ylabel.replace("misses", r"misses / $N^2$")
@@ -228,7 +233,7 @@ def plot(results_dir: Path, labels: List[str], include_partial: bool, usetex: bo
             subtitle_y = legend.get_window_extent(renderer).y0 / fig.bbox.height - 0.012
             gs.update(top=subtitle_y - 0.035)
     fig.text(0.5, subtitle_y, rf"Dense {pass_name} pass, $d = 64$" + (" (hollow markers: incomplete repetitions)"
-             if include_partial else ""), ha="center", color=MUTED, fontsize=9)
+             if include_partial else ""), ha="center", color=TITLE, fontsize=TITLE_SIZE)
     return fig
 
 
