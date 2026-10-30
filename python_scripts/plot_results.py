@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """Plot dense forward-pass benchmark results across architectures.
 
-Reads the per-experiment JSON files written by benchmark.py and draws a 4 x A grid
+Reads the per-experiment JSON files written by benchmark.py and draws a 3 x A grid
 (A = one column per architecture label):
 
   row 1  runtime (median of repetitions, whiskers = min/max) over N
   row 2  L1 data cache misses over N   (PAPI sweep)
   row 3  L2 data cache misses over N
-  row 4  L3 total cache misses over N
+
+L3 misses are recorded by the PAPI sweep but not plotted.
 
 With --normalize every metric is divided by N^2 (per query-key pair), which removes the
 quadratic trend so algorithms with similar scaling separate visually.
@@ -53,7 +54,6 @@ ROWS = [
     ("sweep", "time", "Runtime (s)"),
     ("papi", "PAPI_L1_DCM", "L1 data cache misses"),
     ("papi", "PAPI_L2_DCM", "L2 data cache misses"),
-    ("papi", "PAPI_L3_TCM", "L3 cache misses"),
 ]
 
 # Default series per pass; None draws every algorithm that has results
@@ -146,8 +146,11 @@ def plot(results_dir: Path, labels: List[str], include_partial: bool, usetex: bo
             all_n.update(r["N"] for r in records)
 
     n_rows, n_cols = len(ROWS), len(labels)
-    fig = plt.figure(figsize=(3.6 * n_cols, 2.6 * n_rows + 0.8))
-    gs = fig.add_gridspec(n_rows, n_cols, hspace=0.18, wspace=0.12, top=0.90, bottom=0.07,
+    height = 2.6 * n_rows + 0.8
+    fig = plt.figure(figsize=(3.6 * n_cols, height))
+    # Margins are fixed in inches (converted to figure fractions), so the legend, title and axis
+    # labels keep their spacing for any number of rows
+    gs = fig.add_gridspec(n_rows, n_cols, hspace=0.18, wspace=0.12, top=1 - 1.15 / height, bottom=0.78 / height,
                           left=min(0.24, 0.24 / n_cols), right=0.98)  # Same absolute margin for any column count
 
     axes = [[None] * n_cols for _ in range(n_rows)]
@@ -218,7 +221,7 @@ def plot(results_dir: Path, labels: List[str], include_partial: bool, usetex: bo
     ordered = [handles[algorithm_key(a, pass_name)] for a, _ in ALGORITHMS if algorithm_key(a, pass_name) in handles]
     # One legend row if it fits; otherwise wrap onto as few rows as fit the figure width, and move
     # the subtitle and panels below the legend's measured bottom edge
-    subtitle_y = 0.935
+    subtitle_y = 1 - 0.75 / height
     if ordered:
         renderer = fig.canvas.get_renderer()
         legend = None
@@ -226,12 +229,12 @@ def plot(results_dir: Path, labels: List[str], include_partial: bool, usetex: bo
             if legend is not None:
                 legend.remove()
             legend = fig.legend(ordered, [h.get_label() for h in ordered], loc="upper center", ncol=ncol,
-                                frameon=False, fontsize=9, bbox_to_anchor=(0.5, 0.985), labelcolor=TEXT)
+                                frameon=False, fontsize=9, bbox_to_anchor=(0.5, 1 - 0.17 / height), labelcolor=TEXT)
             if legend.get_window_extent(renderer).width <= 0.98 * fig.bbox.width:
                 break
         if ncol < len(ordered):
-            subtitle_y = legend.get_window_extent(renderer).y0 / fig.bbox.height - 0.012
-            gs.update(top=subtitle_y - 0.035)
+            subtitle_y = legend.get_window_extent(renderer).y0 / fig.bbox.height - 0.15 / height
+            gs.update(top=subtitle_y - 0.42 / height)
     fig.text(0.5, subtitle_y, rf"Dense {pass_name} pass, $d = 64$" + (" (hollow markers: incomplete repetitions)"
              if include_partial else ""), ha="center", color=TITLE, fontsize=TITLE_SIZE)
     return fig

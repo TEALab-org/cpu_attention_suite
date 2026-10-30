@@ -2,7 +2,7 @@
 """Generate a LaTeX table of runtime and cache misses at one sequence length.
 
 Rows are grouped by architecture (one group per label), one row per algorithm; columns are
-the median runtime from the timing sweep and the median L1/L2/L3 misses from the PAPI sweep.
+the median runtime from the timing sweep and the median L1/L2 misses from the PAPI sweep (L3 misses are recorded but not tabulated).
 --memory adds the peak resident memory each algorithm adds above its inputs (GiB), measured on
 the first solve of the timing sweep's experiment.
 Each cache-miss column gets a single power-of-ten scale in its header so values stay short,

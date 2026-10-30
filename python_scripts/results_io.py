@@ -37,10 +37,10 @@ ARCHITECTURES = {
     "spr": "Sapphire Rapids",
 }
 
+# Cache levels reported in tables; benchmark.py also records PAPI_L3_TCM, which is left out here
 PAPI_EVENTS = [
     ("PAPI_L1_DCM", "L1"),
     ("PAPI_L2_DCM", "L2"),
-    ("PAPI_L3_TCM", "L3"),
 ]
 
 

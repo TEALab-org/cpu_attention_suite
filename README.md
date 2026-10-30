@@ -142,7 +142,7 @@ python python_scripts/plot_sparsity.py --results-dir <results-dir> --output-dir 
 python python_scripts/plot_sparsity_runtime.py --results-dir <results-dir> --output-dir <out> [--pass backward]
 ```
 
-`plot_results.py` draws runtime and L1/L2/L3 misses over N with one column per architecture;
+`plot_results.py` draws runtime and L1/L2 misses over N (L3 is recorded but not shown) with one column per architecture;
 `--normalize` divides by N^2. `make_table.py` writes a LaTeX (booktabs, multirow) table at one N; `--memory` adds each
 algorithm's peak memory above its inputs (GiB) from the timing sweep.
 `make_tuning_table.py` writes a single-column table of the tuned b, g and p; `--fragment` leaves out
